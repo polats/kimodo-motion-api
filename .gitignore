@@ -9,6 +9,13 @@ SMPLX_NEUTRAL.npz
 # Locally cloned NVIDIA viser fork (its own repo at github.com/nv-tlabs/kimodo-viser).
 kimodo-viser/
 
+# Mixamo character source (FBX) — Adobe TOS: don't redistribute.
+*.fbx
+
+# Transient build artifact staged into the repo by gemma-4-self-hosted's
+# kimodo-motion/build-and-push.sh; cleaned up on script exit.
+Dockerfile.kimodo-motion
+
 # Local persistence of generated motion clips.
 .kimodo-animations/
 

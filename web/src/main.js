@@ -2,21 +2,31 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { Animator } from './animator.js'
+import { CHARACTERS, getCharacter } from './rigs.js'
 
 const KIMODO_URL = import.meta.env.VITE_KIMODO_URL || 'http://localhost:7862'
-const MODEL_URL = '/models/smplx_neutral.glb'
+const SMPLX_HEIGHT = 1.7  // approx height of the SMPL-X neutral mesh, used for stride scaling
 
 const statusEl = document.getElementById('status')
 const promptEl = document.getElementById('prompt')
 const btnEl = document.getElementById('generate')
 const secondsEl = document.getElementById('seconds')
 const secondsLabelEl = document.getElementById('seconds-label')
+const characterEl = document.getElementById('character')
+const alignEl = document.getElementById('align')
 const savedEl = document.getElementById('saved')
 const deleteEl = document.getElementById('delete')
 
 secondsEl.addEventListener('input', () => {
   secondsLabelEl.textContent = `${parseFloat(secondsEl.value).toFixed(1)} s`
 })
+
+for (const c of CHARACTERS) {
+  const opt = document.createElement('option')
+  opt.value = c.id
+  opt.textContent = c.label
+  characterEl.appendChild(opt)
+}
 
 function setStatus(text) { statusEl.textContent = text }
 
@@ -37,7 +47,6 @@ const controls = new OrbitControls(camera, renderer.domElement)
 controls.target.set(0, 1.0, 0)
 controls.update()
 
-// Light + floor
 scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1.2))
 const dir = new THREE.DirectionalLight(0xffffff, 1.5)
 dir.position.set(3, 5, 2)
@@ -59,29 +68,91 @@ window.addEventListener('resize', () => {
 
 // --- Avatar ---------------------------------------------------------------
 let animator = null
+let currentRoot = null  // the THREE.Group/Object3D for the loaded character
+let currentMotion = null
 
-async function loadAvatar() {
-  setStatus('Loading avatar…')
-  const gltf = await new GLTFLoader().loadAsync(MODEL_URL)
-  scene.add(gltf.scene)
+const gltfLoader = new GLTFLoader()
+
+async function loadCharacter(charConfig) {
+  setStatus(`Loading ${charConfig.label}…`)
+
+  if (currentRoot) {
+    scene.remove(currentRoot)
+    currentRoot.traverse(o => {
+      if (o.geometry) o.geometry.dispose()
+      if (o.material) {
+        if (Array.isArray(o.material)) o.material.forEach(m => m.dispose())
+        else o.material.dispose()
+      }
+    })
+    currentRoot = null
+  }
+
+  const gltf = await gltfLoader.loadAsync(charConfig.url)
+  const root = gltf.scene
+
+  root.scale.setScalar(charConfig.scale ?? 1.0)
+  scene.add(root)
+
   let skinned = null
-  gltf.scene.traverse(o => { if (o.isSkinnedMesh) skinned = o })
-  if (!skinned) throw new Error('No SkinnedMesh in GLB')
-  // Helps with skinned-mesh frustum culling glitches.
-  skinned.frustumCulled = false
+  root.traverse(o => {
+    if (o.isSkinnedMesh && !skinned) skinned = o
+    if (o.isSkinnedMesh) o.frustumCulled = false  // skinning + culling = glitches
+  })
 
-  // Anchor feet to floor (Y=0). SMPL-X v_template is centered on the pelvis so
-  // the rest mesh extends below Y=0; lift the whole rig by -minY.
-  gltf.scene.updateMatrixWorld(true)
-  const restBox = new THREE.Box3().setFromObject(skinned)
+  // Anchor feet to Y=0 in scene, after scale + bones are realized.
+  root.updateMatrixWorld(true)
+  const restBox = new THREE.Box3().setFromObject(root)
   const groundOffsetY = -restBox.min.y
-  gltf.scene.position.y = groundOffsetY
+  root.position.y += groundOffsetY
 
-  animator = new Animator(skinned, { groundOffsetY })
-  setStatus('Ready. Type a prompt and Generate.')
+  // Center the character at the scene origin (X=Z=0). The Blender Studio
+  // GLBs have the pelvis baked at a non-zero world position (e.g. x=-5.18 for
+  // female realistic), which would put the character off-screen at rest.
+  // Re-center by adjusting the pelvis bone's local X/Z; the per-frame
+  // animation loop will overwrite pelvis.position with kimodo's root_positions
+  // once a clip plays, so this only affects the rest pose.
+  let pelvisBone = null
+  if (charConfig.mapping?.pelvis) {
+    const pelvisName = charConfig.mapping.pelvis.replace(/\./g, '')
+    root.traverse(o => {
+      if (!pelvisBone && o.name && o.name.replace(/\./g, '') === pelvisName) pelvisBone = o
+    })
+  }
+  if (pelvisBone) {
+    pelvisBone.position.x = 0
+    pelvisBone.position.z = 0
+    root.updateMatrixWorld(true)
+  }
+
+  // Stride scale: kimodo motion is in meters at ~SMPL-X height.
+  const charHeight = restBox.max.y - restBox.min.y
+  const strideScale = charHeight / SMPLX_HEIGHT
+
+  // Drive a real SkinnedMesh if present; otherwise drive the parented Object3D
+  // hierarchy directly (no skinning, rigid joints — fine for stylized base meshes).
+  const target = (charConfig.skinned && skinned) ? skinned : root
+  animator = new Animator(target, {
+    mapping: charConfig.mapping,
+    scale: strideScale,
+    groundOffsetY,
+    alignMode: alignEl.value,
+  })
+
+  currentRoot = root
+  setStatus(`Loaded ${charConfig.label}. ${currentMotion ? 'Replaying.' : 'Type a prompt and Generate.'}`)
+
+  // Debug exposure for browser console.
+  window.__root = root
+  window.__scene = scene
+  const allNames = []
+  root.traverse(o => allNames.push(`${o.type}:${o.name || '(noname)'}`))
+  console.log(`[loadCharacter] traversed ${allNames.length} objects in '${charConfig.label}':`, allNames)
+
+  if (currentMotion) animator.setMotion(currentMotion, { loop: true })
 }
 
-// --- Generate -------------------------------------------------------------
+// --- API ------------------------------------------------------------------
 async function generate(prompt, seconds = 5) {
   const r = await fetch(`${KIMODO_URL}/generate`, {
     method: 'POST',
@@ -136,6 +207,7 @@ async function refreshSaved(selectId) {
   if (selectId) savedEl.value = selectId
 }
 
+// --- UI wiring ------------------------------------------------------------
 btnEl.addEventListener('click', async () => {
   const prompt = promptEl.value.trim()
   if (!prompt || !animator) return
@@ -144,6 +216,7 @@ btnEl.addEventListener('click', async () => {
   setStatus(`Generating ${seconds.toFixed(1)}s…`)
   try {
     const motion = await generate(prompt, seconds)
+    currentMotion = motion
     animator.setMotion(motion, { loop: true })
     setStatus(`Playing (${motion.num_frames} frames @ ${motion.fps} fps).`)
     await refreshSaved(motion.id)
@@ -166,6 +239,7 @@ savedEl.addEventListener('change', async () => {
       secondsEl.value = motion.seconds
       secondsLabelEl.textContent = `${motion.seconds.toFixed(1)} s`
     }
+    currentMotion = motion
     animator.setMotion(motion, { loop: true })
     setStatus(`Playing saved (${motion.num_frames} frames @ ${motion.fps} fps).`)
   } catch (e) {
@@ -188,6 +262,23 @@ deleteEl.addEventListener('click', async () => {
   }
 })
 
+characterEl.addEventListener('change', async () => {
+  const charConfig = getCharacter(characterEl.value)
+  try {
+    await loadCharacter(charConfig)
+  } catch (e) {
+    console.error(e)
+    setStatus(`Load error: ${e.message}`)
+  }
+})
+
+alignEl.addEventListener('change', () => {
+  if (animator) {
+    animator.setAlignMode(alignEl.value)
+    setStatus(`Alignment: ${alignEl.value}`)
+  }
+})
+
 // --- Loop -----------------------------------------------------------------
 function tick() {
   animator?.update()
@@ -197,5 +288,7 @@ function tick() {
 }
 tick()
 
-loadAvatar().catch(e => { console.error(e); setStatus(`Load error: ${e.message}`) })
+// Initial load: SMPL-X (first in list).
+characterEl.value = CHARACTERS[0].id
+loadCharacter(CHARACTERS[0]).catch(e => { console.error(e); setStatus(`Load error: ${e.message}`) })
 refreshSaved().catch(() => {})

@@ -75,7 +75,7 @@ def build_app() -> FastAPI:
             "default_seconds": DEFAULT_SECONDS,
         }
 
-    def _build_record(prompt: str, seconds: float, num_frames: int, quats_wxyz, root_positions) -> dict:
+    def _build_record(prompt: str, seconds: float, num_frames: int, local_quats_wxyz, global_quats_xyzw, root_positions) -> dict:
         return {
             "prompt": prompt,
             "seconds": seconds,
@@ -83,7 +83,12 @@ def build_app() -> FastAPI:
             "num_frames": num_frames,
             "model": MODEL_NAME,
             "bone_names": bone_names,
-            "local_quats_wxyz": quats_wxyz.tolist(),
+            # Local rotations (relative to parent), wxyz. Sufficient for SMPL-X rigs that
+            # share kimodo's rest pose. Use global_quats_xyzw for retargeting to any rig.
+            "local_quats_wxyz": local_quats_wxyz.tolist(),
+            # Global (world-space) rotations, xyzw (three.js native order). Required for
+            # retargeting kimodo motion onto rigs with a different rest pose (e.g. Mixamo).
+            "global_quats_xyzw": global_quats_xyzw.tolist(),
             "root_positions": root_positions.tolist(),
         }
 
@@ -104,10 +109,21 @@ def build_app() -> FastAPI:
                 )
 
         local_rot_mats = out["local_rot_mats"][0].detach().cpu().numpy()  # [T, J, 3, 3]
+        global_rot_mats = out["global_rot_mats"][0].detach().cpu().numpy()  # [T, J, 3, 3]
         root_positions = out["root_positions"][0].detach().cpu().numpy()  # [T, 3]
-        quats_wxyz = tf.SO3.from_matrix(local_rot_mats).wxyz  # [T, J, 4]
+        local_quats_wxyz = tf.SO3.from_matrix(local_rot_mats).wxyz  # [T, J, 4]
+        global_quats_wxyz = tf.SO3.from_matrix(global_rot_mats).wxyz
+        # wxyz -> xyzw for the global field (three.js native order).
+        global_quats_xyzw = global_quats_wxyz[..., [1, 2, 3, 0]]
 
-        record = _build_record(req.prompt.strip(), seconds, int(local_rot_mats.shape[0]), quats_wxyz, root_positions)
+        record = _build_record(
+            req.prompt.strip(),
+            seconds,
+            int(local_rot_mats.shape[0]),
+            local_quats_wxyz,
+            global_quats_xyzw,
+            root_positions,
+        )
         try:
             record["id"] = store.save(record)
         except Exception as e:
