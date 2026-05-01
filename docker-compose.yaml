@@ -24,6 +24,9 @@ services:
       # Host user mapping (for non-root ownership + proper shell prompt)
       - HOST_USER=${USER:-user}
 
+      # Run the text encoder on CPU so the demo container gets the full GPU.
+      - TEXT_ENCODER_DEVICE=cpu
+
       # GPU
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
@@ -63,6 +66,10 @@ services:
       - ./checkpoints:/workspace/checkpoints:ro
     ports:
       - "${SERVER_PORT:-7860}:${SERVER_PORT:-7860}"
+      # Extra port for run_simple_app.py (bring up via `docker exec demo python -m kimodo.scripts.run_simple_app`).
+      - "7861:7861"
+      # Motion API (run_motion_api.py) — used by external frontends (e.g. the Vite sample in web/).
+      - "7862:7862"
     environment:
       # Point the model at the text-encoder service.
       - TEXT_ENCODER_URL=http://text-encoder:9550/

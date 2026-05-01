@@ -1,6 +1,26 @@
 # debugging files
 debug/
+
+# Licensed SMPL-X body model and any GLB derived from it.
+# Distribution governed by https://smpl-x.is.tue.mpg.de/ — DO NOT COMMIT.
 SMPLX_NEUTRAL.npz
+*.glb
+
+# Locally cloned NVIDIA viser fork (its own repo at github.com/nv-tlabs/kimodo-viser).
+kimodo-viser/
+
+# Local persistence of generated motion clips.
+.kimodo-animations/
+
+# Env files (may contain API keys).
+.env
+.env.local
+.env.*.local
+
+# Vite / Node frontends
+web/node_modules
+web/dist
+web/.vite
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
