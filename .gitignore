@@ -24,6 +24,17 @@ Dockerfile.kimodo-motion
 # Local persistence of generated motion clips.
 .kimodo-animations/
 
+# Cached Mixamo character FBX downloads (server-side, transient).
+.mixamo-cache/
+
+# Server-side registries of imported characters and Mixamo animations.
+# Local state, not part of the source tree.
+.kimodo-characters/
+.kimodo-mixamo-animations/
+
+# Mixamo animation GLBs are derivable via web/scripts/bulk_import_mixamo_animations.py
+web/public/animations/
+
 # Env files (may contain API keys).
 .env
 .env.local

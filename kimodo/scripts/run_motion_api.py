@@ -26,6 +26,8 @@ from pydantic import BaseModel
 
 from kimodo.model.load_model import load_model
 from kimodo.scripts.animation_store import make_store
+from kimodo.scripts.character_registry import CharacterRegistry
+from kimodo.scripts.animation_registry import MixamoAnimationRegistry
 
 MODEL_NAME = os.environ.get("KIMODO_MODEL", "kimodo-smplx-rp")
 NUM_DENOISING_STEPS = int(os.environ.get("KIMODO_DENOISING_STEPS", "20"))
@@ -56,6 +58,11 @@ def build_app() -> FastAPI:
 
     store = make_store()
     print(f"Animation store: {type(store).__name__}")
+
+    char_registry = CharacterRegistry()
+    print(f"Character registry: {char_registry.root}")
+    mx_anim_registry = MixamoAnimationRegistry()
+    print(f"Mixamo animation registry: {mx_anim_registry.root}")
 
     app = FastAPI(title="Kimodo Motion API")
     app.add_middleware(
@@ -148,6 +155,67 @@ def build_app() -> FastAPI:
     @app.delete("/animations/{anim_id}")
     def delete_animation(anim_id: str) -> dict:
         if not store.delete(anim_id):
+            raise HTTPException(404, f"animation '{anim_id}' not found")
+        return {"deleted": anim_id}
+
+    @app.get("/characters")
+    def list_characters() -> dict:
+        return {"characters": char_registry.list()}
+
+    @app.delete("/characters/{char_id}")
+    def delete_character(char_id: str) -> dict:
+        if not char_registry.delete(char_id):
+            raise HTTPException(404, f"character '{char_id}' not found")
+        return {"deleted": char_id}
+
+    @app.get("/mixamo/search")
+    def mixamo_search(q: str, limit: int = 24) -> dict:
+        from kimodo.scripts.mixamo import search_characters, MixamoError
+        try:
+            return {"results": search_characters(q, limit=limit)}
+        except MixamoError as e:
+            raise HTTPException(502, str(e))
+
+    class MixamoImportRequest(BaseModel):
+        id: str
+        name: str
+
+    @app.post("/mixamo/import")
+    def mixamo_import(req: MixamoImportRequest) -> dict:
+        from kimodo.scripts.mixamo import import_character, MixamoError
+        try:
+            config = import_character(req.id, req.name)
+        except MixamoError as e:
+            raise HTTPException(502, str(e))
+        # Persist to the registry so the next /characters call sees it.
+        config["source"] = "mixamo"
+        config["source_id"] = req.id
+        return char_registry.save(config)
+
+    @app.get("/mixamo/animations/search")
+    def mixamo_anim_search(q: str, limit: int = 24) -> dict:
+        from kimodo.scripts.mixamo import search_motions, MixamoError
+        try:
+            return {"results": search_motions(q, limit=limit)}
+        except MixamoError as e:
+            raise HTTPException(502, str(e))
+
+    @app.post("/mixamo/animations/import")
+    def mixamo_anim_import(req: MixamoImportRequest) -> dict:
+        from kimodo.scripts.mixamo import import_motion, MixamoError
+        try:
+            config = import_motion(req.id, req.name)
+        except MixamoError as e:
+            raise HTTPException(502, str(e))
+        return mx_anim_registry.save(config)
+
+    @app.get("/mixamo/animations")
+    def mixamo_anim_list() -> dict:
+        return {"animations": mx_anim_registry.list()}
+
+    @app.delete("/mixamo/animations/{anim_id}")
+    def mixamo_anim_delete(anim_id: str) -> dict:
+        if not mx_anim_registry.delete(anim_id):
             raise HTTPException(404, f"animation '{anim_id}' not found")
         return {"deleted": anim_id}
 

@@ -38,6 +38,37 @@ def slugify(name: str) -> str:
     return s.strip("_")
 
 
+def convert_fbx_to_glb(fbx_path: Path, char_id: str | None = None,
+                       out_dir: Path = OUT_DIR) -> Path:
+    """Convert a Mixamo FBX to GLB. Returns the output path.
+
+    Importable from server code so the frontend's "Import from Mixamo"
+    flow can reuse the same conversion as the CLI."""
+    fbx_path = Path(fbx_path)
+    if not fbx_path.exists():
+        raise FileNotFoundError(fbx_path)
+    if not FBX2GLTF.exists():
+        raise FileNotFoundError(
+            f"FBX2glTF binary not found at {FBX2GLTF}; "
+            f"see {FBX2GLTF.parent}/README.md")
+
+    char_id = char_id or slugify(fbx_path.stem)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_glb = out_dir / f"mixamo_{char_id}.glb"
+    out_stem = out_glb.with_suffix("")
+
+    proc = subprocess.run(
+        [str(FBX2GLTF), "--binary", "--input", str(fbx_path),
+         "--output", str(out_stem)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0 or not out_glb.exists():
+        raise RuntimeError(
+            f"FBX2glTF failed (exit {proc.returncode}):\n"
+            f"{proc.stdout}\n{proc.stderr}")
+    return out_glb
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -47,31 +78,11 @@ def main():
                          "(default: derived from the FBX basename)")
     args = ap.parse_args()
 
-    if not args.fbx.exists():
-        sys.exit(f"error: {args.fbx} not found")
-    if not FBX2GLTF.exists():
-        sys.exit(
-            f"error: FBX2glTF binary not found at {FBX2GLTF}\n"
-            f"see {FBX2GLTF.parent}/README.md for download instructions"
-        )
-
+    try:
+        out_glb = convert_fbx_to_glb(args.fbx, args.character_id)
+    except Exception as e:
+        sys.exit(f"error: {e}")
     char_id = args.character_id or slugify(args.fbx.stem)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_glb = OUT_DIR / f"mixamo_{char_id}.glb"
-
-    # FBX2glTF writes <output>.glb — pass the path without the extension.
-    out_stem = out_glb.with_suffix("")
-    cmd = [str(FBX2GLTF), "--binary", "--input", str(args.fbx),
-           "--output", str(out_stem)]
-    print(f"$ {' '.join(cmd)}")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stdout)
-        sys.stderr.write(proc.stderr)
-        sys.exit(f"FBX2glTF failed (exit {proc.returncode})")
-
-    if not out_glb.exists():
-        sys.exit(f"FBX2glTF reported success but {out_glb} is missing")
 
     label = args.fbx.stem.replace("_", " ").title()
     print(f"\n[ok] wrote {out_glb.relative_to(REPO_ROOT)}")

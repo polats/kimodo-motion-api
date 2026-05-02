@@ -2,7 +2,11 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { Animator } from './animator.js'
-import { CHARACTERS, getCharacter } from './rigs.js'
+import { CHARACTERS, getCharacter, mixamoMapping } from './rigs.js'
+
+// Mapping kinds the backend may return when importing a remote character.
+// Keep in sync with kimodo/scripts/mixamo.py.
+const MAPPING_BUILDERS = { mixamo: mixamoMapping }
 
 const KIMODO_URL = import.meta.env.VITE_KIMODO_URL || 'http://localhost:7862'
 const SMPLX_HEIGHT = 1.7  // approx height of the SMPL-X neutral mesh, used for stride scaling
@@ -21,11 +25,47 @@ secondsEl.addEventListener('input', () => {
   secondsLabelEl.textContent = `${parseFloat(secondsEl.value).toFixed(1)} s`
 })
 
-for (const c of CHARACTERS) {
+function appendCharacterOption(c) {
   const opt = document.createElement('option')
   opt.value = c.id
   opt.textContent = c.label
   characterEl.appendChild(opt)
+}
+
+function addCharacter(charConfig) {
+  // Hydrate mapping if it came from the server as a kind name.
+  if (typeof charConfig.mapping === 'string' || charConfig.mappingKind) {
+    const kind = charConfig.mappingKind || charConfig.mapping
+    const builder = MAPPING_BUILDERS[kind]
+    if (!builder) throw new Error(`Unknown mapping kind: ${kind}`)
+    charConfig = { ...charConfig, mapping: builder() }
+  }
+  if (!CHARACTERS.find(c => c.id === charConfig.id)) {
+    CHARACTERS.push(charConfig)
+    appendCharacterOption(charConfig)
+  }
+  return charConfig
+}
+
+// Snapshot built-in character ids before any imports so we can tell them
+// apart later when persisting (we only save imports, not the bundled rigs).
+const BUILTIN_CHAR_IDS = new Set(CHARACTERS.map(c => c.id))
+
+for (const c of CHARACTERS) appendCharacterOption(c)
+
+async function refreshServerCharacters() {
+  // Source of truth lives on the server. Pull on startup, on import, on delete.
+  try {
+    const r = await fetch(`${KIMODO_URL}/characters`)
+    if (!r.ok) throw new Error(`API ${r.status}: ${await r.text()}`)
+    const { characters } = await r.json()
+    for (const c of characters) {
+      if (BUILTIN_CHAR_IDS.has(c.id)) continue
+      try { addCharacter(c) } catch (e) { console.warn('skip char', c.id, e) }
+    }
+  } catch (e) {
+    console.warn('character registry fetch failed', e)
+  }
 }
 
 function setStatus(text) { statusEl.textContent = text }
@@ -71,11 +111,29 @@ let animator = null
 let currentRoot = null  // the THREE.Group/Object3D for the loaded character
 let currentMotion = null
 
+// Mixamo animations (GLB with embedded animation tracks) are driven via
+// three.js' AnimationMixer rather than the kimodo retargeter. Only one of
+// {animator, mixamoMixer} should be playing at a time per character.
+let mixamoMixer = null
+let mixamoClock = null
+let mixamoAnimations = []  // populated from /mixamo/animations on startup
+
 const gltfLoader = new GLTFLoader()
+
+function stopMixamoMixer() {
+  if (mixamoMixer) {
+    mixamoMixer.stopAllAction()
+    mixamoMixer.uncacheRoot(currentRoot)
+    mixamoMixer = null
+    mixamoClock = null
+  }
+}
 
 async function loadCharacter(charConfig) {
   setStatus(`Loading ${charConfig.label}…`)
 
+  // Tear down any mixer or previous root before replacing.
+  stopMixamoMixer()
   if (currentRoot) {
     scene.remove(currentRoot)
     currentRoot.traverse(o => {
@@ -160,7 +218,15 @@ async function loadCharacter(charConfig) {
   root.traverse(o => allNames.push(`${o.type}:${o.name || '(noname)'}`))
   console.log(`[loadCharacter] traversed ${allNames.length} objects in '${charConfig.label}':`, allNames)
 
-  if (currentMotion) animator.setMotion(currentMotion, { loop: true })
+  // Restore whatever was playing before the character change.
+  if (currentMotion && currentMotion._kind === 'mixamo') {
+    playMixamoAnimation(currentMotion.config).catch(e => {
+      console.error(e)
+      setStatus(`Mixamo replay failed: ${e.message}`)
+    })
+  } else if (currentMotion) {
+    animator.setMotion(currentMotion, { loop: true })
+  }
 }
 
 // --- API ------------------------------------------------------------------
@@ -192,6 +258,44 @@ async function deleteAnimation(id) {
   if (!r.ok) throw new Error(`API ${r.status}: ${await r.text()}`)
 }
 
+async function fetchMixamoAnimations() {
+  try {
+    const r = await fetch(`${KIMODO_URL}/mixamo/animations`)
+    if (!r.ok) throw new Error(`API ${r.status}`)
+    const { animations } = await r.json()
+    mixamoAnimations = animations
+  } catch (e) {
+    console.warn('mixamo animations fetch failed', e)
+    mixamoAnimations = []
+  }
+}
+
+async function loadMixamoClip(animUrl) {
+  const animGltf = await gltfLoader.loadAsync(animUrl)
+  // Mixamo GLBs ship with an empty "Take 001" alongside the real "mixamo.com"
+  // clip — pick the one with actual tracks.
+  const clip =
+    animGltf.animations.find(c => c.tracks && c.tracks.length > 0)
+    || animGltf.animations[0]
+  if (!clip) throw new Error('animation GLB has no clips')
+  return clip
+}
+
+async function playMixamoAnimation(animConfig) {
+  if (!currentRoot) throw new Error('no character loaded')
+  // Stop kimodo retargeter and any previous mixer; one animation source at a time.
+  if (animator) animator.playing = false
+  stopMixamoMixer()
+
+  const clip = await loadMixamoClip(animConfig.url)
+  mixamoMixer = new THREE.AnimationMixer(currentRoot)
+  const action = mixamoMixer.clipAction(clip)
+  action.setLoop(THREE.LoopRepeat, Infinity)
+  action.play()
+  mixamoClock = new THREE.Clock()
+  currentMotion = { _kind: 'mixamo', config: animConfig, clip }
+}
+
 function fmtAnim(a) {
   const dur = a.seconds ? `${a.seconds.toFixed(1)}s` : ''
   const title = (a.prompt || '(unnamed)').slice(0, 60)
@@ -199,21 +303,43 @@ function fmtAnim(a) {
 }
 
 async function refreshSaved(selectId) {
-  let animations = []
-  try { animations = await listAnimations() }
-  catch (e) { console.warn('list failed', e); return }
+  let kimodoAnims = []
+  try { kimodoAnims = await listAnimations() }
+  catch (e) { console.warn('list failed', e) }
+
+  // Pull Mixamo registry too so both sources show up in one place.
+  await fetchMixamoAnimations()
+
   savedEl.innerHTML = ''
+  const total = kimodoAnims.length + mixamoAnimations.length
   const placeholder = document.createElement('option')
   placeholder.value = ''
-  placeholder.textContent = animations.length
-    ? `— ${animations.length} saved —`
+  placeholder.textContent = total
+    ? `— ${total} animations (${kimodoAnims.length} kimodo / ${mixamoAnimations.length} mixamo) —`
     : '— no saved animations —'
   savedEl.appendChild(placeholder)
-  for (const a of animations) {
-    const opt = document.createElement('option')
-    opt.value = a.id
-    opt.textContent = fmtAnim(a)
-    savedEl.appendChild(opt)
+
+  if (kimodoAnims.length) {
+    const kg = document.createElement('optgroup')
+    kg.label = 'Kimodo (text-to-motion)'
+    for (const a of kimodoAnims) {
+      const opt = document.createElement('option')
+      opt.value = a.id
+      opt.textContent = fmtAnim(a)
+      kg.appendChild(opt)
+    }
+    savedEl.appendChild(kg)
+  }
+  if (mixamoAnimations.length) {
+    const mg = document.createElement('optgroup')
+    mg.label = 'Mixamo'
+    for (const a of mixamoAnimations) {
+      const opt = document.createElement('option')
+      opt.value = a.id
+      opt.textContent = a.label
+      mg.appendChild(opt)
+    }
+    savedEl.appendChild(mg)
   }
   if (selectId) savedEl.value = selectId
 }
@@ -227,6 +353,8 @@ btnEl.addEventListener('click', async () => {
   setStatus(`Generating ${seconds.toFixed(1)}s…`)
   try {
     const motion = await generate(prompt, seconds)
+    stopMixamoMixer()
+    if (animator) animator.playing = true
     currentMotion = motion
     animator.setMotion(motion, { loop: true })
     setStatus(`Playing (${motion.num_frames} frames @ ${motion.fps} fps).`)
@@ -241,10 +369,21 @@ btnEl.addEventListener('click', async () => {
 
 savedEl.addEventListener('change', async () => {
   const id = savedEl.value
-  if (!id || !animator) return
+  if (!id) return
   setStatus(`Loading saved…`)
   try {
+    // Mixamo animation? (id starts with 'mixamo_anim_').
+    if (id.startsWith('mixamo_anim_')) {
+      const animConfig = mixamoAnimations.find(a => a.id === id)
+      if (!animConfig) throw new Error(`Mixamo animation ${id} not found`)
+      await playMixamoAnimation(animConfig)
+      setStatus(`Playing Mixamo: ${animConfig.label}`)
+      return
+    }
+    if (!animator) return
     const motion = await fetchAnimation(id)
+    stopMixamoMixer()
+    if (animator) animator.playing = true
     promptEl.value = motion.prompt || promptEl.value
     if (motion.seconds) {
       secondsEl.value = motion.seconds
@@ -273,7 +412,14 @@ deleteEl.addEventListener('click', async () => {
   }
 })
 
+const charDeleteEl = document.getElementById('char-delete')
+
+function refreshCharDeleteState() {
+  charDeleteEl.disabled = BUILTIN_CHAR_IDS.has(characterEl.value)
+}
+
 characterEl.addEventListener('change', async () => {
+  refreshCharDeleteState()
   const charConfig = getCharacter(characterEl.value)
   try {
     await loadCharacter(charConfig)
@@ -283,6 +429,29 @@ characterEl.addEventListener('change', async () => {
   }
 })
 
+charDeleteEl.addEventListener('click', async () => {
+  const id = characterEl.value
+  if (BUILTIN_CHAR_IDS.has(id)) return
+  const idx = CHARACTERS.findIndex(c => c.id === id)
+  if (idx < 0) return
+  if (!confirm(`Remove "${CHARACTERS[idx].label}" from your character list?`)) return
+  try {
+    const r = await fetch(`${KIMODO_URL}/characters/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!r.ok) throw new Error(`API ${r.status}: ${await r.text()}`)
+  } catch (e) {
+    console.error(e)
+    setStatus(`Delete failed: ${e.message}`)
+    return
+  }
+  CHARACTERS.splice(idx, 1)
+  // Rebuild the dropdown options.
+  characterEl.innerHTML = ''
+  for (const c of CHARACTERS) appendCharacterOption(c)
+  characterEl.value = CHARACTERS[0].id
+  refreshCharDeleteState()
+  loadCharacter(CHARACTERS[0]).catch(e => setStatus(`Load error: ${e.message}`))
+})
+
 alignEl.addEventListener('change', () => {
   if (animator) {
     animator.setAlignMode(alignEl.value)
@@ -290,16 +459,109 @@ alignEl.addEventListener('change', () => {
   }
 })
 
+// --- Mixamo import --------------------------------------------------------
+const mixamoBtn = document.getElementById('mixamo-btn')
+const mixamoPanel = document.getElementById('mixamo-panel')
+const mixamoSearchEl = document.getElementById('mixamo-search')
+const mixamoResultsEl = document.getElementById('mixamo-results')
+const mixamoStatusEl = document.getElementById('mixamo-status')
+
+mixamoBtn.addEventListener('click', () => {
+  mixamoPanel.classList.toggle('open')
+  if (mixamoPanel.classList.contains('open')) mixamoSearchEl.focus()
+})
+
+let searchSeq = 0
+let searchDebounce = 0
+mixamoSearchEl.addEventListener('input', () => {
+  clearTimeout(searchDebounce)
+  searchDebounce = setTimeout(runSearch, 300)
+})
+
+async function runSearch() {
+  const q = mixamoSearchEl.value.trim()
+  if (!q) {
+    mixamoResultsEl.innerHTML = ''
+    mixamoStatusEl.textContent = ''
+    return
+  }
+  const seq = ++searchSeq
+  mixamoStatusEl.textContent = `Searching “${q}”…`
+  try {
+    const r = await fetch(`${KIMODO_URL}/mixamo/search?q=${encodeURIComponent(q)}&limit=24`)
+    if (!r.ok) throw new Error(`API ${r.status}: ${await r.text()}`)
+    const { results } = await r.json()
+    if (seq !== searchSeq) return  // a newer query superseded us
+    renderResults(results)
+    mixamoStatusEl.textContent = `${results.length} result${results.length === 1 ? '' : 's'}`
+  } catch (e) {
+    if (seq !== searchSeq) return
+    console.error(e)
+    mixamoStatusEl.textContent = `Error: ${e.message}`
+  }
+}
+
+function renderResults(results) {
+  mixamoResultsEl.innerHTML = ''
+  for (const r of results) {
+    const card = document.createElement('div')
+    card.className = 'mx-card'
+    card.title = `Click to import ${r.name}`
+    const img = document.createElement('img')
+    if (r.thumbnail) img.src = r.thumbnail
+    img.alt = r.name
+    img.loading = 'lazy'
+    const name = document.createElement('div')
+    name.className = 'name'
+    name.textContent = r.name
+    card.append(img, name)
+    card.addEventListener('click', () => importCharacter(r, card))
+    mixamoResultsEl.appendChild(card)
+  }
+}
+
+async function importCharacter(result, card) {
+  if (card.classList.contains('busy')) return
+  card.classList.add('busy')
+  mixamoStatusEl.textContent = `Importing ${result.name}… (Mixamo packaging can take 10–30s)`
+  try {
+    const r = await fetch(`${KIMODO_URL}/mixamo/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: result.id, name: result.name }),
+    })
+    if (!r.ok) throw new Error(`API ${r.status}: ${await r.text()}`)
+    const charConfig = await r.json()
+    const added = addCharacter(charConfig)
+    characterEl.value = added.id
+    refreshCharDeleteState()
+    await loadCharacter(added)
+    mixamoStatusEl.textContent = `Imported ${result.name}.`
+  } catch (e) {
+    console.error(e)
+    mixamoStatusEl.textContent = `Error: ${e.message}`
+  } finally {
+    card.classList.remove('busy')
+  }
+}
+
 // --- Loop -----------------------------------------------------------------
 function tick() {
-  animator?.update()
+  if (mixamoMixer && mixamoClock) {
+    mixamoMixer.update(mixamoClock.getDelta())
+  } else {
+    animator?.update()
+  }
   controls.update()
   renderer.render(scene, camera)
   requestAnimationFrame(tick)
 }
 tick()
 
-// Initial load: SMPL-X (first in list).
+// Initial load: SMPL-X (first in list). Server-side imports get appended
+// asynchronously and become available without forcing a page reload.
 characterEl.value = CHARACTERS[0].id
+refreshCharDeleteState()
 loadCharacter(CHARACTERS[0]).catch(e => { console.error(e); setStatus(`Load error: ${e.message}`) })
+refreshServerCharacters().catch(() => {})
 refreshSaved().catch(() => {})

@@ -19,6 +19,18 @@
       #character, #saved { flex: 1; padding: 6px 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; }
       #delete { padding: 6px 10px; background: #5a3a3a; }
       #delete:hover { background: #7a4a4a; }
+      #mixamo-btn { padding: 6px 10px; background: #3a4a5a; }
+      #mixamo-btn:hover { background: #4a5a6a; }
+      #mixamo-panel { display: none; flex-direction: column; gap: 8px; padding: 8px; background: rgba(0,0,0,0.4); border-radius: 6px; }
+      #mixamo-panel.open { display: flex; }
+      #mixamo-search { padding: 6px 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; }
+      #mixamo-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; max-height: 320px; overflow-y: auto; }
+      .mx-card { background: #222; border: 1px solid #333; border-radius: 6px; padding: 4px; cursor: pointer; text-align: center; font-size: 11px; }
+      .mx-card:hover { border-color: #4a90e2; }
+      .mx-card.busy { opacity: 0.5; cursor: wait; }
+      .mx-card img { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 4px; background: #111; display: block; }
+      .mx-card .name { margin-top: 4px; line-height: 1.2; word-break: break-word; }
+      #mixamo-status { font-size: 11px; color: #999; }
       #prompt { flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; font-size: 14px; }
       button { padding: 8px 14px; border-radius: 6px; border: 0; background: #4a90e2; color: white; cursor: pointer; font-size: 14px; }
       button:disabled { background: #555; cursor: wait; }
@@ -41,6 +53,8 @@
         <div id="row3">
           <label for="character">Character:</label>
           <select id="character"></select>
+          <button id="mixamo-btn" title="Import a character from Mixamo">+ Mixamo</button>
+          <button id="char-delete" title="Remove the selected imported character" style="background: #5a3a3a; padding: 6px 9px;" disabled>✕</button>
           <label for="align" style="margin-left: 8px;">Align:</label>
           <select id="align" title="rest: use bone rest orientation (skinned). frame: full primary+twist alignment. direction: axis only. none: pass-through.">
             <option value="rest">rest</option>
@@ -48,6 +62,11 @@
             <option value="direction">direction</option>
             <option value="none">none</option>
           </select>
+        </div>
+        <div id="mixamo-panel">
+          <input id="mixamo-search" type="text" placeholder="Search Mixamo characters (e.g. 'robot', 'zombie', 'knight')…" />
+          <div id="mixamo-status"></div>
+          <div id="mixamo-results"></div>
         </div>
         <div id="row4">
           <label for="saved">Saved:</label>
