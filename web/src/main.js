@@ -459,6 +459,98 @@ alignEl.addEventListener('change', () => {
   }
 })
 
+// --- Searchable pickers (character + animation) ---------------------------
+// Each picker is a button that opens a popover with a search box, source
+// filter, and a virtualized-ish list. Selecting an item drives the
+// hidden <select> that the rest of the app already listens on, so all
+// existing change-handlers keep working unchanged.
+function makePicker({ rootId, btnId, popId, searchId, filterId, listId,
+                      hostSelect, getItems, formatItem, onSelect }) {
+  const root = document.getElementById(rootId)
+  const btn = document.getElementById(btnId)
+  const pop = document.getElementById(popId)
+  const search = document.getElementById(searchId)
+  const filterRoot = document.getElementById(filterId)
+  const listEl = document.getElementById(listId)
+  let activeSource = 'all'
+  let isOpen = false
+
+  function open() {
+    if (isOpen) return
+    pop.classList.add('open')
+    isOpen = true
+    search.value = ''
+    render()
+    setTimeout(() => search.focus(), 0)
+  }
+  function close() {
+    pop.classList.remove('open')
+    isOpen = false
+  }
+  function toggle() { isOpen ? close() : open() }
+
+  function render() {
+    const q = search.value.trim().toLowerCase()
+    const items = getItems().filter(it => {
+      if (activeSource !== 'all' && it.source !== activeSource) return false
+      if (!q) return true
+      return it.label.toLowerCase().includes(q)
+    })
+    listEl.innerHTML = ''
+    if (!items.length) {
+      const e = document.createElement('div')
+      e.className = 'empty'
+      e.textContent = 'No matches.'
+      listEl.appendChild(e)
+      return
+    }
+    const currentValue = hostSelect.value
+    for (const it of items) {
+      const row = document.createElement('div')
+      row.className = 'item' + (it.id === currentValue ? ' selected' : '')
+      const label = document.createElement('span')
+      label.textContent = formatItem ? formatItem(it) : it.label
+      row.appendChild(label)
+      if (it.source && it.source !== 'all') {
+        const badge = document.createElement('span')
+        badge.className = `badge ${it.source}`
+        badge.textContent = it.source
+        row.appendChild(badge)
+      }
+      row.addEventListener('click', () => {
+        hostSelect.value = it.id
+        hostSelect.dispatchEvent(new Event('change'))
+        btn.textContent = it.label
+        if (onSelect) onSelect(it)
+        close()
+      })
+      listEl.appendChild(row)
+    }
+  }
+
+  btn.addEventListener('click', toggle)
+  search.addEventListener('input', render)
+  for (const fbtn of filterRoot.querySelectorAll('button')) {
+    fbtn.addEventListener('click', () => {
+      activeSource = fbtn.dataset.source
+      for (const x of filterRoot.querySelectorAll('button')) x.classList.toggle('active', x === fbtn)
+      render()
+    })
+  }
+  // Close when clicking outside.
+  document.addEventListener('click', (e) => {
+    if (!isOpen) return
+    if (root.contains(e.target)) return
+    close()
+  })
+
+  return {
+    refresh: render,
+    setLabel: (text) => { btn.textContent = text },
+    close,
+  }
+}
+
 // --- Mixamo import --------------------------------------------------------
 const mixamoBtn = document.getElementById('mixamo-btn')
 const mixamoPanel = document.getElementById('mixamo-panel')
@@ -558,9 +650,61 @@ function tick() {
 }
 tick()
 
+// Wire up the two searchable pickers. Each one drives the hidden <select>
+// (characterEl / savedEl) that the rest of the app already listens on.
+const characterPicker = makePicker({
+  rootId: 'character-picker',
+  btnId: 'character-btn',
+  popId: 'character-pop',
+  searchId: 'character-search',
+  filterId: 'character-filter',
+  listId: 'character-list',
+  hostSelect: characterEl,
+  getItems: () => CHARACTERS.map(c => ({
+    id: c.id,
+    label: c.label,
+    source: BUILTIN_CHAR_IDS.has(c.id) ? 'builtin' : 'mixamo',
+  })),
+})
+
+const savedPicker = makePicker({
+  rootId: 'saved-picker',
+  btnId: 'saved-btn',
+  popId: 'saved-pop',
+  searchId: 'saved-search',
+  filterId: 'saved-filter',
+  listId: 'saved-list',
+  hostSelect: savedEl,
+  getItems: () => {
+    const out = []
+    // Kimodo animations (from <select> options, group label "Kimodo (text-to-motion)").
+    for (const opt of savedEl.querySelectorAll('option')) {
+      if (!opt.value) continue
+      const isMixamo = opt.value.startsWith('mixamo_anim_')
+      out.push({
+        id: opt.value,
+        label: opt.textContent,
+        source: isMixamo ? 'mixamo' : 'kimodo',
+      })
+    }
+    return out
+  },
+})
+
+// Keep picker button labels in sync when the underlying selects change.
+characterEl.addEventListener('change', () => {
+  const c = CHARACTERS.find(c => c.id === characterEl.value)
+  if (c) characterPicker.setLabel(c.label)
+})
+savedEl.addEventListener('change', () => {
+  const opt = savedEl.querySelector(`option[value="${savedEl.value}"]`)
+  if (opt) savedPicker.setLabel(opt.textContent)
+})
+
 // Initial load: SMPL-X (first in list). Server-side imports get appended
 // asynchronously and become available without forcing a page reload.
 characterEl.value = CHARACTERS[0].id
+characterPicker.setLabel(CHARACTERS[0].label)
 refreshCharDeleteState()
 loadCharacter(CHARACTERS[0]).catch(e => { console.error(e); setStatus(`Load error: ${e.message}`) })
 refreshServerCharacters().catch(() => {})
