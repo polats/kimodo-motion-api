@@ -114,9 +114,10 @@ async function loadCharacter(charConfig) {
   // once a clip plays, so this only affects the rest pose.
   let pelvisBone = null
   if (charConfig.mapping?.pelvis) {
-    const pelvisName = charConfig.mapping.pelvis.replace(/\./g, '')
+    const norm = (n) => n.replace(/[.:]/g, '')
+    const pelvisName = norm(charConfig.mapping.pelvis)
     root.traverse(o => {
-      if (!pelvisBone && o.name && o.name.replace(/\./g, '') === pelvisName) pelvisBone = o
+      if (!pelvisBone && o.name && norm(o.name) === pelvisName) pelvisBone = o
     })
   }
   if (pelvisBone) {

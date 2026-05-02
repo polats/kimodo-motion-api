@@ -12,6 +12,11 @@ kimodo-viser/
 # Mixamo character source (FBX) — Adobe TOS: don't redistribute.
 *.fbx
 
+# Bundled third-party binaries (e.g. FBX2glTF). Fetch per
+# web/scripts/tools/README.md.
+web/scripts/tools/*
+!web/scripts/tools/README.md
+
 # Transient build artifact staged into the repo by gemma-4-self-hosted's
 # kimodo-motion/build-and-push.sh; cleaned up on script exit.
 Dockerfile.kimodo-motion

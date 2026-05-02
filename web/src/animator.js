@@ -85,7 +85,12 @@ export class Animator {
     // three.js strips '.' from node names (reserved for animation binding paths
     // like '.position' or '.morphTargetInfluences[0]'). Normalize both sides on
     // lookup so rig configs can use the original Blender naming with .L/.R.
-    const norm = (n) => n.replace(/\./g, '')
+    // Three.js GLTFLoader sanitizes node names (replaces ':' with '_' and
+    // strips '.'). Mixamo bones come in as 'mixamorig:Hips' but appear in
+    // the loaded scene as 'mixamorig_Hips'. Strip both characters from
+    // both sides of the comparison so the mapping table can use either
+    // form verbatim.
+    const norm = (n) => n.replace(/[.:]/g, '')
     this.bonesByName = Object.fromEntries(drivable.map(b => [norm(b.name), b]))
     this._normName = norm
 

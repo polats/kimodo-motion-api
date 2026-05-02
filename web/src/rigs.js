@@ -213,10 +213,62 @@ export const CHARACTERS = [
     blends: blenderStudioBlends(),
     scale: 1.0,
   },
+
+  // Mixamo characters — converted from FBX via web/scripts/import_mixamo_glb.py.
+  // All Mixamo characters share the same skeleton, so mixamoMapping() is reused.
+  {
+    id: 'mixamo_y_bot',
+    label: 'Y Bot (Mixamo)',
+    url: '/models/mixamo_y_bot.glb',
+    skinned: true,
+    mapping: mixamoMapping(),
+    scale: 1.0,
+  },
+  {
+    id: 'mixamo_x_bot',
+    label: 'X Bot (Mixamo)',
+    url: '/models/mixamo_x_bot.glb',
+    skinned: true,
+    mapping: mixamoMapping(),
+    scale: 1.0,
+  },
 ]
 
 export function getCharacter(id) {
   return CHARACTERS.find(c => c.id === id) || CHARACTERS[0]
+}
+
+// Mixamo's standard skeleton (mixamorig:* prefix). Same naming for every
+// Mixamo character — drop in any FBX downloaded from mixamo.com (T-pose,
+// no animation needed) via web/scripts/import_mixamo_glb.py and reuse this
+// mapping. Three.js GLTFLoader sanitizes ':' → '_' on import, so the
+// retargeter's _normName strips both '.' and ':' to make the lookup match
+// regardless of which form a given GLB uses.
+export function mixamoMapping() {
+  return {
+    pelvis:          'mixamorig:Hips',
+    left_hip:        'mixamorig:LeftUpLeg',
+    right_hip:       'mixamorig:RightUpLeg',
+    spine1:          'mixamorig:Spine',
+    left_knee:       'mixamorig:LeftLeg',
+    right_knee:      'mixamorig:RightLeg',
+    spine2:          'mixamorig:Spine1',
+    left_ankle:      'mixamorig:LeftFoot',
+    right_ankle:     'mixamorig:RightFoot',
+    spine3:          'mixamorig:Spine2',
+    left_foot:       'mixamorig:LeftToeBase',
+    right_foot:      'mixamorig:RightToeBase',
+    neck:            'mixamorig:Neck',
+    left_collar:     'mixamorig:LeftShoulder',
+    right_collar:    'mixamorig:RightShoulder',
+    head:            'mixamorig:Head',
+    left_shoulder:   'mixamorig:LeftArm',
+    right_shoulder:  'mixamorig:RightArm',
+    left_elbow:      'mixamorig:LeftForeArm',
+    right_elbow:     'mixamorig:RightForeArm',
+    left_wrist:      'mixamorig:LeftHand',
+    right_wrist:     'mixamorig:RightHand',
+  }
 }
 
 function identityMapping() {
