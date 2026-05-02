@@ -134,8 +134,8 @@ async function loadCharacter(charConfig) {
   const target = (charConfig.skinned && skinned) ? skinned : root
 
   // Skinned → 'rest' (preserves rest-world quaternion, kimodo applies as delta).
-  // Rigid → 'none' (after T-pose bake the rest is identity-aligned with SMPL-X,
-  //                  so just pass kimodo's world rotations through directly).
+  // Rigid → 'none' (rotations baked to identity in mesh data at build time,
+  //                  so kimodo's world quat applies directly).
   const autoAlign = target.isSkinnedMesh ? 'rest' : 'none'
   alignEl.value = autoAlign
 
@@ -153,6 +153,8 @@ async function loadCharacter(charConfig) {
   // Debug exposure for browser console.
   window.__root = root
   window.__scene = scene
+  window.__camera = camera
+  window.__controls = controls
   const allNames = []
   root.traverse(o => allNames.push(`${o.type}:${o.name || '(noname)'}`))
   console.log(`[loadCharacter] traversed ${allNames.length} objects in '${charConfig.label}':`, allNames)
