@@ -637,6 +637,87 @@ async function importCharacter(result, card) {
   }
 }
 
+// --- Mixamo animation import ----------------------------------------------
+const mxAnimBtn = document.getElementById('mixamo-anim-btn')
+const mxAnimPanel = document.getElementById('mixamo-anim-panel')
+const mxAnimSearchEl = document.getElementById('mixamo-anim-search')
+const mxAnimResultsEl = document.getElementById('mixamo-anim-results')
+const mxAnimStatusEl = document.getElementById('mixamo-anim-status')
+
+mxAnimBtn.addEventListener('click', () => {
+  mxAnimPanel.classList.toggle('open')
+  if (mxAnimPanel.classList.contains('open')) mxAnimSearchEl.focus()
+})
+
+let mxAnimSeq = 0
+let mxAnimDebounce = 0
+mxAnimSearchEl.addEventListener('input', () => {
+  clearTimeout(mxAnimDebounce)
+  mxAnimDebounce = setTimeout(runMxAnimSearch, 300)
+})
+
+async function runMxAnimSearch() {
+  const q = mxAnimSearchEl.value.trim()
+  if (!q) { mxAnimResultsEl.innerHTML = ''; mxAnimStatusEl.textContent = ''; return }
+  const seq = ++mxAnimSeq
+  mxAnimStatusEl.textContent = `Searching “${q}”…`
+  try {
+    const r = await fetch(`${KIMODO_URL}/mixamo/animations/search?q=${encodeURIComponent(q)}&limit=24`)
+    if (!r.ok) throw new Error(`API ${r.status}: ${await r.text()}`)
+    const { results } = await r.json()
+    if (seq !== mxAnimSeq) return
+    renderMxAnimResults(results)
+    mxAnimStatusEl.textContent = `${results.length} result${results.length === 1 ? '' : 's'}`
+  } catch (e) {
+    if (seq !== mxAnimSeq) return
+    console.error(e)
+    mxAnimStatusEl.textContent = `Error: ${e.message}`
+  }
+}
+
+function renderMxAnimResults(results) {
+  mxAnimResultsEl.innerHTML = ''
+  for (const r of results) {
+    const row = document.createElement('div')
+    row.className = 'item'
+    row.title = `Click to import ${r.name}`
+    row.textContent = r.name
+    row.addEventListener('click', () => importMxAnim(r, row))
+    mxAnimResultsEl.appendChild(row)
+  }
+}
+
+async function importMxAnim(result, row) {
+  if (row.classList.contains('busy')) return
+  row.classList.add('busy')
+  row.style.opacity = '0.5'
+  mxAnimStatusEl.textContent = `Importing ${result.name}… (Mixamo packaging can take 10–30s)`
+  try {
+    const r = await fetch(`${KIMODO_URL}/mixamo/animations/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: result.id, name: result.name }),
+    })
+    if (!r.ok) throw new Error(`API ${r.status}: ${await r.text()}`)
+    const animConfig = await r.json()
+    await refreshSaved(animConfig.id)
+    savedPicker.refresh()
+    // If a Mixamo character is loaded, kick off playback right away.
+    const c = CHARACTERS.find(c => c.id === characterEl.value)
+    if (c && c.id.startsWith('mixamo_')) {
+      await playMixamoAnimation(animConfig)
+      savedPicker.setLabel(animConfig.label)
+    }
+    mxAnimStatusEl.textContent = `Imported ${result.name}.`
+  } catch (e) {
+    console.error(e)
+    mxAnimStatusEl.textContent = `Error: ${e.message}`
+  } finally {
+    row.classList.remove('busy')
+    row.style.opacity = ''
+  }
+}
+
 // --- Loop -----------------------------------------------------------------
 function tick() {
   if (mixamoMixer && mixamoClock) {
