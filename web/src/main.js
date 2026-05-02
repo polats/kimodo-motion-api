@@ -676,11 +676,23 @@ const savedPicker = makePicker({
   listId: 'saved-list',
   hostSelect: savedEl,
   getItems: () => {
+    // Mixamo animations only work on Mixamo characters (shared mixamorig:*
+    // skeleton). Kimodo animations work on every character thanks to the
+    // runtime retargeter. Hide the incompatible ones rather than play
+    // them silently into bones that don't exist.
+    const currentCharIsMixamo = (() => {
+      const c = CHARACTERS.find(c => c.id === characterEl.value)
+      // Both server-imported (mappingKind='mixamo') and built-in Mixamo
+      // characters (rigs.js entries with mixamoMapping() resolved) qualify.
+      // Use id prefix as the universal signal — every Mixamo character
+      // registers under `mixamo_*`.
+      return c && c.id.startsWith('mixamo_')
+    })()
     const out = []
-    // Kimodo animations (from <select> options, group label "Kimodo (text-to-motion)").
     for (const opt of savedEl.querySelectorAll('option')) {
       if (!opt.value) continue
       const isMixamo = opt.value.startsWith('mixamo_anim_')
+      if (isMixamo && !currentCharIsMixamo) continue
       out.push({
         id: opt.value,
         label: opt.textContent,
@@ -691,10 +703,13 @@ const savedPicker = makePicker({
   },
 })
 
-// Keep picker button labels in sync when the underlying selects change.
+// Keep picker button labels in sync when the underlying selects change,
+// and re-render the saved picker so Mixamo animations get hidden when
+// the selected character isn't Mixamo.
 characterEl.addEventListener('change', () => {
   const c = CHARACTERS.find(c => c.id === characterEl.value)
   if (c) characterPicker.setLabel(c.label)
+  savedPicker.refresh()
 })
 savedEl.addEventListener('change', () => {
   const opt = savedEl.querySelector(`option[value="${savedEl.value}"]`)
