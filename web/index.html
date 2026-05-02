@@ -42,7 +42,8 @@
           <label for="character">Character:</label>
           <select id="character"></select>
           <label for="align" style="margin-left: 8px;">Align:</label>
-          <select id="align" title="Frame: full alignment (best for skinned). Direction: axis only (gentler on rigid meshes). None: pass-through.">
+          <select id="align" title="rest: use bone rest orientation (skinned). frame: full primary+twist alignment. direction: axis only. none: pass-through.">
+            <option value="rest">rest</option>
             <option value="frame">frame</option>
             <option value="direction">direction</option>
             <option value="none">none</option>

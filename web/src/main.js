@@ -132,11 +132,19 @@ async function loadCharacter(charConfig) {
   // Drive a real SkinnedMesh if present; otherwise drive the parented Object3D
   // hierarchy directly (no skinning, rigid joints — fine for stylized base meshes).
   const target = (charConfig.skinned && skinned) ? skinned : root
+
+  // Skinned → 'rest' (preserves rest-world quaternion, kimodo applies as delta).
+  // Rigid → 'none' (after T-pose bake the rest is identity-aligned with SMPL-X,
+  //                  so just pass kimodo's world rotations through directly).
+  const autoAlign = target.isSkinnedMesh ? 'rest' : 'none'
+  alignEl.value = autoAlign
+
   animator = new Animator(target, {
     mapping: charConfig.mapping,
+    blends: charConfig.blends || {},
     scale: strideScale,
     groundOffsetY,
-    alignMode: alignEl.value,
+    alignMode: autoAlign,
   })
 
   currentRoot = root

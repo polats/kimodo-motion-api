@@ -130,46 +130,87 @@ export const CHARACTERS = [
     mapping: identityMapping(),
     scale: 1.0,
   },
+  // Skinned variants — built via Blender script: armature → join meshes →
+  // auto-weight at down-pose → pose arms to SMPL-X rest direction → apply pose
+  // as rest → re-bind weights → export. Bones are named with the kimodo
+  // SMPLXSkeleton22 convention so identity mapping works.
+  {
+    id: 'female_realistic_skinned',
+    label: 'Female Realistic (skinned)',
+    url: '/models/female_realistic_skinned.glb',
+    skinned: true,
+    mapping: identityMapping(),
+    scale: 1.0,
+  },
+  {
+    id: 'male_realistic_skinned',
+    label: 'Male Realistic (skinned)',
+    url: '/models/male_realistic_skinned.glb',
+    skinned: true,
+    mapping: identityMapping(),
+    scale: 1.0,
+  },
+  {
+    id: 'female_stylized_skinned',
+    label: 'Female Stylized (skinned)',
+    url: '/models/female_stylized_skinned.glb',
+    skinned: true,
+    mapping: identityMapping(),
+    scale: 1.0,
+  },
+  {
+    id: 'male_stylized_skinned',
+    label: 'Male Stylized (skinned)',
+    url: '/models/male_stylized_skinned.glb',
+    skinned: true,
+    mapping: identityMapping(),
+    scale: 1.0,
+  },
+
+  // Original rigid (unskinned) variants — kept around for troubleshooting.
+  // T-posed as of the latest export. Default 'none' alignment matches
+  // SMPL-X motion well; a blend rule on collar bones makes the rigid
+  // shoulder mesh partially follow the arm's rotation, approximating the
+  // shoulder-cap deformation we get for free in skinned rigs.
   {
     id: 'female_realistic',
-    label: 'Female Realistic (Blender Studio)',
+    label: 'Female Realistic (rigid)',
     url: '/models/female_primitive.glb',
     skinned: false,
-    // Female realistic uses an inverted naming pattern for limbs
-    // ("{part}_primitive_female_realistic") vs everyone else
-    // ("{part}_{gender}_primitive_{flavor}"). Hand-written rather than coerced
-    // through the generic builder to keep the override surface readable.
     mapping: femaleRealisticMapping(),
+    blends: blenderStudioBlends(),
     scale: 1.0,
   },
   {
     id: 'male_realistic',
-    label: 'Male Realistic (Blender Studio)',
+    label: 'Male Realistic (rigid)',
     url: '/models/male_primitive.glb',
     skinned: false,
     mapping: blenderStudioMapping('male', 'realistic', {
-      // Bundle authors used "foot.005" and the typo "teo_big" only on male realistic.
       left_ankle: 'GEO-foot.005_male_primitive_realistic.L',
       right_ankle: 'GEO-foot.005_male_primitive_realistic.R',
       left_foot: 'GEO-teo_big_male_primitive_realistic.L',
       right_foot: 'GEO-teo_big_male_primitive_realistic.R',
     }),
+    blends: blenderStudioBlends(),
     scale: 1.0,
   },
   {
     id: 'female_stylized',
-    label: 'Female Stylized (Blender Studio)',
+    label: 'Female Stylized (rigid)',
     url: '/models/female_stylized.glb',
     skinned: false,
     mapping: blenderStudioMapping('female', 'stylized'),
+    blends: blenderStudioBlends(),
     scale: 1.0,
   },
   {
     id: 'male_stylized',
-    label: 'Male Stylized (Blender Studio)',
+    label: 'Male Stylized (rigid)',
     url: '/models/male_stylized.glb',
     skinned: false,
     mapping: blenderStudioMapping('male', 'stylized'),
+    blends: blenderStudioBlends(),
     scale: 1.0,
   },
 ]
@@ -186,6 +227,20 @@ function identityMapping() {
     'right_shoulder', 'left_elbow', 'right_elbow', 'left_wrist', 'right_wrist',
   ]
   return Object.fromEntries(names.map(n => [n, n]))
+}
+
+// Blend rules for rigid Blender Studio rigs: the collar mesh follows ~50% of
+// the upper-arm rotation in addition to its own. Without skinning, the collar
+// is a separate rigid chunk that only rotates when kimodo's collar bone
+// rotates — but kimodo's collar barely moves in most motions while the arm
+// swings widely. Slerping toward the arm's rotation makes the shoulder mesh
+// "ride along" with the arm, mimicking how a skinned shoulder cap blends
+// vertex weights between collar and upper-arm bones.
+function blenderStudioBlends() {
+  return {
+    left_collar:  { with: 'left_shoulder',  factor: 0.5 },
+    right_collar: { with: 'right_shoulder', factor: 0.5 },
+  }
 }
 
 function femaleRealisticMapping() {
