@@ -14,9 +14,11 @@ Run inside the demo container:
 Reads TEXT_ENCODER_URL from env the same way the rest of kimodo does.
 """
 
+import math
 import os
 import threading
 
+import numpy as np
 import torch
 import uvicorn
 import viser.transforms as tf
@@ -24,6 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from kimodo.constraints import FullBodyConstraintSet, compute_global_heading
 from kimodo.model.load_model import load_model
 from kimodo.scripts.animation_store import make_store
 from kimodo.scripts.character_registry import CharacterRegistry
@@ -35,9 +38,25 @@ DEFAULT_SECONDS = 5.0
 MAX_SECONDS = 10.0
 
 
+class SeamPose(BaseModel):
+    # Reference to a single frame of a previously-generated animation. Used to
+    # pin frame 0 and frame N-1 of a new generation to the same full-body pose
+    # via a FullBodyConstraintSet, so the resulting motion loops cleanly.
+    #
+    # `direction` is a 2-element [x, z] unit vector in the seam's LOCAL frame
+    # (forward = +Z, right = +X) describing the desired loop translation.
+    # When None, both endpoints share the same XZ → in-place loop. When set,
+    # the second endpoint is offset along this direction (rotated into world
+    # frame by the seam's heading) so the model produces a translating loop.
+    anim_id: str
+    frame_idx: int
+    direction: list[float] | None = None
+
+
 class GenerateRequest(BaseModel):
     prompt: str
     seconds: float = DEFAULT_SECONDS
+    seam_pose: SeamPose | None = None
 
 
 def _passthrough(iterable, *args, **kwargs):
@@ -82,8 +101,8 @@ def build_app() -> FastAPI:
             "default_seconds": DEFAULT_SECONDS,
         }
 
-    def _build_record(prompt: str, seconds: float, num_frames: int, local_quats_wxyz, global_quats_xyzw, root_positions) -> dict:
-        return {
+    def _build_record(prompt: str, seconds: float, num_frames: int, local_quats_wxyz, global_quats_xyzw, root_positions, posed_joints, seam_pose: SeamPose | None) -> dict:
+        record = {
             "prompt": prompt,
             "seconds": seconds,
             "fps": fps,
@@ -97,7 +116,88 @@ def build_app() -> FastAPI:
             # retargeting kimodo motion onto rigs with a different rest pose (e.g. Mixamo).
             "global_quats_xyzw": global_quats_xyzw.tolist(),
             "root_positions": root_positions.tolist(),
+            # World-space joint positions [T, J, 3]. Persisted so any frame of any
+            # animation can later serve as a FullBodyConstraintSet seam pose.
+            "posed_joints": posed_joints.tolist(),
         }
+        if seam_pose is not None:
+            record["seam_pose"] = {"anim_id": seam_pose.anim_id, "frame_idx": seam_pose.frame_idx}
+        return record
+
+    def _build_seam_constraint(seam: SeamPose, num_frames: int, seconds: float) -> FullBodyConstraintSet:
+        rec = store.get(seam.anim_id)
+        if rec is None:
+            raise HTTPException(404, f"seam_pose anim_id '{seam.anim_id}' not found")
+        if "posed_joints" not in rec:
+            raise HTTPException(
+                400,
+                f"seam_pose source '{seam.anim_id}' has no posed_joints — regenerate it",
+            )
+        T = int(rec["num_frames"])
+        f = int(seam.frame_idx)
+        if not 0 <= f < T:
+            raise HTTPException(400, f"seam_pose frame_idx {f} out of range [0, {T})")
+
+        joints = torch.tensor(rec["posed_joints"][f], device=device, dtype=torch.float32)  # [J, 3]
+        quats_xyzw = np.asarray(rec["global_quats_xyzw"][f], dtype=np.float32)  # [J, 4]
+        rot_mats_np = tf.SO3.from_quaternion_xyzw(quats_xyzw).as_matrix()  # [J, 3, 3]
+        rots = torch.tensor(rot_mats_np, device=device, dtype=torch.float32)
+
+        # Translate the seam's joints so the pelvis sits at world XZ origin.
+        # The source clip's seam pose is in absolute world coordinates of
+        # whatever clip it came from — we want the new motion to start at
+        # the origin so it integrates cleanly with renderers that anchor
+        # avatars at their own positions.
+        root_idx = skeleton.root_idx
+        src_root_xz = joints[root_idx, [0, 2]].clone()  # [2]
+        joints_at_origin = joints.clone()
+        joints_at_origin[:, 0] -= src_root_xz[0]
+        joints_at_origin[:, 2] -= src_root_xz[1]
+
+        # When the caller asks for a translating loop, build the world-frame
+        # XZ offset by rotating the user-supplied seam-LOCAL direction into
+        # the seam's actual world heading. Without a direction the second
+        # endpoint shares XZ with the first → an in-place loop (idle, wave).
+        #
+        # Coordinate notes — kimodo's compute_heading_angle is
+        # atan2(Δhip_z, -Δhip_x), so heading angle θ=0 means facing +Z and
+        # θ=π/2 means facing +X. The returned (cos, sin) therefore maps:
+        #     world_forward = (sin θ, cos θ)
+        #     world_right   = (cos θ, -sin θ)
+        # so a seam-local (dx, dz) becomes world XZ
+        #     (dx·cos θ + dz·sin θ,  -dx·sin θ + dz·cos θ).
+        joints_end = joints_at_origin.clone()
+        if seam.direction is not None and len(seam.direction) == 2:
+            dx_local = float(seam.direction[0])
+            dz_local = float(seam.direction[1])
+            mag = math.hypot(dx_local, dz_local)
+            if mag > 1e-6:
+                dx_local /= mag
+                dz_local /= mag
+                heading_2d = compute_global_heading(
+                    joints_at_origin.unsqueeze(0), skeleton
+                )[0]  # [2] = (cos θ, sin θ)
+                cos_h = float(heading_2d[0])
+                sin_h = float(heading_2d[1])
+                world_x = dx_local * cos_h + dz_local * sin_h
+                world_z = -dx_local * sin_h + dz_local * cos_h
+                # Distance heuristic: 1 m/s × seconds. Just needs to be
+                # large enough that the model doesn't squeeze motion to
+                # zero; the prompt drives actual cadence/speed.
+                loop_distance = max(0.5, float(seconds) * 1.0)
+                joints_end[:, 0] += world_x * loop_distance
+                joints_end[:, 2] += world_z * loop_distance
+
+        frame_indices = torch.tensor([0, num_frames - 1], device=device, dtype=torch.long)
+        joints_stack = torch.stack([joints_at_origin, joints_end], dim=0)  # [2, J, 3]
+        rots_stack = torch.stack([rots, rots], dim=0)  # [2, J, 3, 3]
+
+        return FullBodyConstraintSet(
+            skeleton=skeleton,
+            frame_indices=frame_indices,
+            global_joints_positions=joints_stack,
+            global_joints_rots=rots_stack,
+        )
 
     @app.post("/generate")
     def generate(req: GenerateRequest) -> dict:
@@ -106,18 +206,31 @@ def build_app() -> FastAPI:
         seconds = max(0.5, min(MAX_SECONDS, float(req.seconds)))
         num_frames = int(round(seconds * fps))
 
+        constraint_lst = None
+        if req.seam_pose is not None:
+            # Per-sample list of constraint sets; we only generate one sample.
+            constraint_lst = [[_build_seam_constraint(req.seam_pose, num_frames, seconds)]]
+
         with gen_lock:
             with torch.no_grad():
                 out = model(
                     [req.prompt],
                     num_frames,
                     NUM_DENOISING_STEPS,
+                    constraint_lst=constraint_lst,
+                    # Enable post-processing only for constrained runs:
+                    # foot-skate cleanup + constraint enforcement tightens the
+                    # seam pose match (frame 0 / frame N-1) so the loop wrap
+                    # doesn't visibly pop. Unconstrained runs keep the prior
+                    # behavior to avoid changing existing clips' character.
+                    post_processing=constraint_lst is not None,
                     progress_bar=_passthrough,
                 )
 
         local_rot_mats = out["local_rot_mats"][0].detach().cpu().numpy()  # [T, J, 3, 3]
         global_rot_mats = out["global_rot_mats"][0].detach().cpu().numpy()  # [T, J, 3, 3]
         root_positions = out["root_positions"][0].detach().cpu().numpy()  # [T, 3]
+        posed_joints = out["posed_joints"][0].detach().cpu().numpy()  # [T, J, 3]
         local_quats_wxyz = tf.SO3.from_matrix(local_rot_mats).wxyz  # [T, J, 4]
         global_quats_wxyz = tf.SO3.from_matrix(global_rot_mats).wxyz
         # wxyz -> xyzw for the global field (three.js native order).
@@ -130,6 +243,8 @@ def build_app() -> FastAPI:
             local_quats_wxyz,
             global_quats_xyzw,
             root_positions,
+            posed_joints,
+            req.seam_pose,
         )
         try:
             record["id"] = store.save(record)
