@@ -118,6 +118,26 @@
           </div>
           <button id="mixamo-anim-btn" title="Import a Mixamo animation" style="background: #3a4a5a; padding: 6px 10px;">+ Mixamo Anim</button>
           <button id="delete" title="Delete the selected animation">✕</button>
+          <button id="ragdoll-test" title="Drop a physics capsule (Rapier sanity check)" style="background: #5a4a3a; padding: 6px 10px;">Drop capsule</button>
+          <button id="ragdoll" title="Ragdoll the current character (drop under physics)" style="background: #6a4a8a; padding: 6px 10px;">Ragdoll</button>
+        </div>
+        <div id="row-ragdoll" style="display: flex; gap: 10px; align-items: center; font-size: 11px; color: #aaa; flex-wrap: wrap;">
+          <span style="color: #888;">Ragdoll:</span>
+          <label><input type="radio" name="rd-impl" value="capsule" checked /> capsule</label>
+          <label><input type="radio" name="rd-impl" value="block" /> block</label>
+          <span style="color: #555;">|</span>
+          <label><input type="checkbox" id="rd-self-collide" checked /> self-collision</label>
+          <label><input type="checkbox" id="rd-joint-contacts-off" checked /> joint contacts off</label>
+          <label><input type="checkbox" id="rd-damping" checked /> damping</label>
+          <label><input type="checkbox" id="rd-hinges" checked /> hinge knees+elbows</label>
+          <label data-impl="capsule"><input type="checkbox" id="rd-pelvis-belt" checked /> pelvis-as-hip-belt</label>
+          <label data-impl="capsule"><input type="checkbox" id="rd-min-len" checked /> min body length</label>
+          <label data-impl="capsule"><input type="checkbox" id="rd-rigid-ext" checked /> rigid extremities</label>
+          <label data-impl="capsule"><input type="checkbox" id="rd-rigid-torso" checked /> rigid torso</label>
+          <label data-impl="block"><input type="checkbox" id="rd-fixed-head" checked /> fixed head</label>
+          <label data-impl="block"><input type="checkbox" id="rd-fixed-handsfeet" checked /> fixed hands+feet</label>
+          <label><input type="checkbox" id="rd-debug" /> debug capsules</label>
+          <span style="color: #666;">(toggles take effect on next Ragdoll)</span>
         </div>
         <div id="mixamo-anim-panel" class="picker-pop" style="position: static; margin-top: 0;">
           <input class="search" id="mixamo-anim-search" type="text" placeholder="Search Mixamo animations (e.g. 'idle', 'wave', 'dance')…" />

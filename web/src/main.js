@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { Animator } from './animator.js'
 import { CHARACTERS, getCharacter, mixamoMapping } from './rigs.js'
+import { initPhysics, spawnTestCapsule, stepPhysics, isReady as physicsReady, Ragdoll, BlockRagdoll } from './ragdoll.js'
 
 // Mapping kinds the backend may return when importing a remote character.
 // Keep in sync with kimodo/scripts/mixamo.py.
@@ -227,6 +228,9 @@ async function loadCharacter(charConfig) {
   } else if (currentMotion) {
     animator.setMotion(currentMotion, { loop: true })
   }
+
+  // Rebuild block ragdoll against the new rig (no-op for capsule impl).
+  onCharacterChanged().catch(e => console.error('[ragdoll] character-change rebuild failed', e))
 }
 
 // --- API ------------------------------------------------------------------
@@ -719,17 +723,202 @@ async function importMxAnim(result, row) {
 }
 
 // --- Loop -----------------------------------------------------------------
+let currentRagdoll = null
+const physicsClock = new THREE.Clock()
+
+function isRagdolling() {
+  // BlockRagdoll has activated state; capsule Ragdoll, when present, is
+  // always considered active (it only exists between Ragdoll and Reset).
+  if (!currentRagdoll) return false
+  if (typeof currentRagdoll.activated === 'boolean') return currentRagdoll.activated
+  return true
+}
+
 function tick() {
-  if (mixamoMixer && mixamoClock) {
+  const ragdolling = isRagdolling()
+  if (ragdolling) {
+    // Physics drives the bones; skip animation playback.
+  } else if (mixamoMixer && mixamoClock) {
     mixamoMixer.update(mixamoClock.getDelta())
   } else {
     animator?.update()
   }
+  // BlockRagdoll in tracking mode: push the bones' new world transforms into
+  // the kinematic bodies BEFORE world.step so Rapier can measure velocity.
+  if (currentRagdoll?.pushKinematic && !ragdolling) {
+    currentRagdoll.pushKinematic()
+  }
+  if (physicsReady()) stepPhysics(physicsClock.getDelta())
   controls.update()
   renderer.render(scene, camera)
   requestAnimationFrame(tick)
 }
 tick()
+
+// --- Ragdoll --------------------------------------------------------------
+async function ensurePhysics() {
+  if (!physicsReady()) {
+    setStatus('Initializing physics…')
+    await initPhysics()
+    physicsClock.getDelta()  // discard long delta accumulated during init
+  }
+}
+
+const ragdollTestBtn = document.getElementById('ragdoll-test')
+ragdollTestBtn?.addEventListener('click', async () => {
+  ragdollTestBtn.disabled = true
+  try {
+    await ensurePhysics()
+    const jitter = () => (Math.random() - 0.5) * 0.4
+    spawnTestCapsule(scene, { x: jitter(), y: 2.5, z: jitter() })
+    setStatus('Capsule dropped.')
+  } catch (e) {
+    console.error(e)
+    setStatus(`Physics error: ${e.message}`)
+  } finally {
+    ragdollTestBtn.disabled = false
+  }
+})
+
+function readRagdollOptions() {
+  return {
+    selfCollide: document.getElementById('rd-self-collide').checked,
+    jointContactsOff: document.getElementById('rd-joint-contacts-off').checked,
+    damping: document.getElementById('rd-damping').checked,
+    pelvisAsHipBelt: document.getElementById('rd-pelvis-belt').checked,
+    minBodyLength: document.getElementById('rd-min-len').checked,
+    hingeKneesElbows: document.getElementById('rd-hinges').checked,
+    rigidExtremities: document.getElementById('rd-rigid-ext').checked,
+    rigidTorso: document.getElementById('rd-rigid-torso').checked,
+    fixedHead: document.getElementById('rd-fixed-head').checked,
+    fixedHandsFeet: document.getElementById('rd-fixed-handsfeet').checked,
+    debug: document.getElementById('rd-debug').checked,
+  }
+}
+
+function getImpl() {
+  return document.querySelector('input[name="rd-impl"]:checked')?.value || 'capsule'
+}
+
+// Hide impl-specific toggles when the other impl is selected.
+function syncRagdollToggleVisibility() {
+  const impl = getImpl()
+  for (const el of document.querySelectorAll('#row-ragdoll label[data-impl]')) {
+    el.style.display = el.dataset.impl === impl ? '' : 'none'
+  }
+}
+syncRagdollToggleVisibility()
+
+// Block impl uses a prebuilt kinematic ragdoll that tracks the bones every
+// frame. The Ragdoll button then just flips it from kinematic to dynamic.
+// Capsule impl keeps the old build-on-click behavior.
+async function setupBlockTracking() {
+  if (!currentRoot || !animator) return
+  await ensurePhysics()
+  // Replace any existing ragdoll (capsule or stale block) before building.
+  if (currentRagdoll) { currentRagdoll.dispose(); currentRagdoll = null }
+  const options = readRagdollOptions()
+  console.log('[ragdoll] prebuilt block tracking with options:', options)
+  currentRagdoll = new BlockRagdoll({ animator, root: currentRoot, scene, options })
+  // .activated stays false → kinematic tracking; pushKinematic runs each frame.
+}
+
+function teardownRagdoll() {
+  if (!currentRagdoll) return
+  currentRagdoll.dispose()
+  currentRagdoll = null
+}
+
+// Impl radio change: rebuild appropriately.
+async function onImplChange() {
+  syncRagdollToggleVisibility()
+  ragdollBtn.textContent = 'Ragdoll'
+  if (getImpl() === 'block') {
+    await setupBlockTracking()
+  } else {
+    teardownRagdoll()
+  }
+}
+for (const r of document.querySelectorAll('input[name="rd-impl"]')) {
+  r.addEventListener('change', () => onImplChange().catch(e => console.error(e)))
+}
+
+// Debug toggle is live: BlockRagdoll exposes setDebug(); other tweaks still
+// require a rebuild (Reset → Ragdoll) since they affect joint topology.
+const debugCheckbox = document.getElementById('rd-debug')
+debugCheckbox?.addEventListener('change', () => {
+  currentRagdoll?.setDebug?.(debugCheckbox.checked)
+})
+
+// Hook character load → rebuild block tracking against the new rig.
+async function onCharacterChanged() {
+  if (getImpl() === 'block') await setupBlockTracking()
+  else teardownRagdoll()
+}
+
+const ragdollBtn = document.getElementById('ragdoll')
+ragdollBtn?.addEventListener('click', async () => {
+  ragdollBtn.disabled = true
+  try {
+    if (!currentRoot || !animator) {
+      setStatus('Load a character first.')
+      return
+    }
+    const impl = getImpl()
+
+    // BlockRagdoll path: tracking ↔ ragdolling toggle.
+    if (impl === 'block') {
+      if (!currentRagdoll) await setupBlockTracking()
+      if (!currentRagdoll) return
+      if (currentRagdoll.activated) {
+        currentRagdoll.deactivate()
+        ragdollBtn.textContent = 'Ragdoll'
+        if (animator) animator.playing = true
+        if (currentMotion && currentMotion._kind === 'mixamo') {
+          playMixamoAnimation(currentMotion.config).catch(e => console.error(e))
+        } else if (currentMotion && animator) {
+          animator.setMotion(currentMotion, { loop: true })
+        }
+        setStatus('Ragdoll cleared.')
+      } else {
+        currentRagdoll.activate()
+        ragdollBtn.textContent = 'Reset'
+        if (animator) animator.playing = false
+        stopMixamoMixer()
+        setStatus('Ragdoll active. Click Reset to restore.')
+      }
+      return
+    }
+
+    // Capsule path: build-on-click / dispose-on-click.
+    if (currentRagdoll) {
+      currentRagdoll.dispose()
+      currentRagdoll = null
+      ragdollBtn.textContent = 'Ragdoll'
+      if (animator) animator.playing = true
+      if (currentMotion && currentMotion._kind === 'mixamo') {
+        playMixamoAnimation(currentMotion.config).catch(e => console.error(e))
+      } else if (currentMotion && animator) {
+        animator.setMotion(currentMotion, { loop: true })
+      }
+      setStatus('Ragdoll cleared.')
+      return
+    }
+    await ensurePhysics()
+    if (animator) animator.playing = false
+    stopMixamoMixer()
+    const options = readRagdollOptions()
+    console.log('[ragdoll] building (capsule) with options:', options)
+    currentRagdoll = new Ragdoll({ animator, root: currentRoot, scene, options })
+    ragdollBtn.textContent = 'Reset'
+    setStatus('Ragdoll active. Click Reset to restore.')
+  } catch (e) {
+    console.error(e)
+    setStatus(`Ragdoll error: ${e.message}`)
+  } finally {
+    ragdollBtn.disabled = false
+  }
+})
 
 // Wire up the two searchable pickers. Each one drives the hidden <select>
 // (characterEl / savedEl) that the rest of the app already listens on.
