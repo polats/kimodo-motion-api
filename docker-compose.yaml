@@ -57,7 +57,12 @@ services:
     image: kimodo:1.0
     container_name: demo
     working_dir: /workspace
-    command: python -m kimodo.demo
+    # Motion API is the canonical service consumed by external frontends
+    # (woid). The gradio demo (`python -m kimodo.demo`) can still be
+    # launched on demand via `docker exec demo python -m kimodo.demo`,
+    # but it loads the diffusion model into VRAM and competes with the
+    # motion API on a 24 GiB card, so we don't run it by default.
+    command: python -m kimodo.scripts.run_motion_api
     volumes:
       - ./:/workspace
       - ${HOME}/.cache/huggingface:/workspace/.cache/huggingface
@@ -65,16 +70,17 @@ services:
       # Explicit checkpoint mount (avoids surprises if the repo bind mount isn't what you expect).
       - ./checkpoints:/workspace/checkpoints:ro
     ports:
-      - "${SERVER_PORT:-7860}:${SERVER_PORT:-7860}"
-      # Extra port for run_simple_app.py (bring up via `docker exec demo python -m kimodo.scripts.run_simple_app`).
+      # Motion API (run_motion_api.py) — primary service consumed by woid.
+      - "${SERVER_PORT:-7862}:${SERVER_PORT:-7862}"
+      # Gradio demo port — kept mapped for `docker exec demo python -m kimodo.demo`.
+      - "7860:7860"
+      # run_simple_app port — kept mapped for ad-hoc `docker exec` launches.
       - "7861:7861"
-      # Motion API (run_motion_api.py) — used by external frontends (e.g. the Vite sample in web/).
-      - "7862:7862"
     environment:
       # Point the model at the text-encoder service.
       - TEXT_ENCODER_URL=http://text-encoder:9550/
       # Make checkpoint paths robust (Hydra config reads this).
-      - SERVER_PORT=${SERVER_PORT:-7860}
+      - SERVER_PORT=${SERVER_PORT:-7862}
       - HF_HOME=/workspace/.cache/huggingface
       # Host user mapping (for non-root ownership + proper shell prompt)
       - HOST_USER=${USER:-user}
