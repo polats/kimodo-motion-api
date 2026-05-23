@@ -232,6 +232,25 @@ export const CHARACTERS = [
     mapping: mixamoMapping(),
     scale: 1.0,
   },
+  // Facepunch s&box citizen — bone naming verified against citizen.vmdl bind
+  // pose. FBX loaded directly (no GLB conversion) via FBXLoader path in
+  // loadCharacterRoot. Sausage / abstract variant first (citizen_lod1.fbx).
+  {
+    id: 'citizen_sbox',
+    label: 'sbox Citizen (sausage)',
+    url: '/models/citizen_sbox.fbx',
+    skinned: true,
+    mapping: citizenMapping(),
+    scale: 0.01,  // sbox units are inches; kimodo data is meters → scale 1u→1cm
+  },
+  {
+    id: 'citizen_human_male',
+    label: 'sbox Citizen (human male)',
+    url: '/models/citizen_human_male.fbx',
+    skinned: true,
+    mapping: citizenMapping(),
+    scale: 0.01,
+  },
 ]
 
 export function getCharacter(id) {
@@ -244,6 +263,29 @@ export function getCharacter(id) {
 // mapping. Three.js GLTFLoader sanitizes ':' → '_' on import, so the
 // retargeter's _normName strips both '.' and ':' to make the lookup match
 // regardless of which form a given GLB uses.
+// s&box Citizen bone mapping. Citizen bones use head→tail +X local axis
+// (verified against bind pose). The 22 SMPL-X joints map cleanly onto
+// citizen's primary skeleton (twist bones, fingers, helpers, IK targets
+// are ignored — they're driven by the existing animgraph or stay at bind).
+export function citizenMapping() {
+  return {
+    pelvis:          'pelvis',
+    left_hip:        'leg_upper_L',  right_hip:       'leg_upper_R',
+    spine1:          'spine_0',
+    left_knee:       'leg_lower_L',  right_knee:      'leg_lower_R',
+    spine2:          'spine_1',
+    left_ankle:      'ankle_L',      right_ankle:     'ankle_R',
+    spine3:          'spine_2',
+    left_foot:       'ball_L',       right_foot:      'ball_R',
+    neck:            'neck_0',
+    left_collar:     'clavicle_L',   right_collar:    'clavicle_R',
+    head:            'head',
+    left_shoulder:   'arm_upper_L',  right_shoulder:  'arm_upper_R',
+    left_elbow:      'arm_lower_L',  right_elbow:     'arm_lower_R',
+    left_wrist:      'hand_L',       right_wrist:     'hand_R',
+  }
+}
+
 export function mixamoMapping() {
   return {
     pelvis:          'mixamorig:Hips',

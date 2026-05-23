@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js'
 import { Animator } from './animator.js'
 import { CHARACTERS, getCharacter, mixamoMapping } from './rigs.js'
 import { initPhysics, spawnTestCapsule, stepPhysics, isReady as physicsReady, Ragdoll, BlockRagdoll } from './ragdoll.js'
@@ -120,6 +121,18 @@ let mixamoClock = null
 let mixamoAnimations = []  // populated from /mixamo/animations on startup
 
 const gltfLoader = new GLTFLoader()
+const fbxLoader = new FBXLoader()
+
+// Load a character mesh. FBX returns Object3D root directly; GLB wraps
+// the scene in gltf.scene. Branch on extension so we can drop in
+// non-converted FBX rigs (e.g. sbox citizen) alongside the existing GLBs.
+async function loadCharacterRoot( url ) {
+  if ( url.toLowerCase().endsWith( '.fbx' ) ) {
+    return await fbxLoader.loadAsync( url )
+  }
+  const gltf = await gltfLoader.loadAsync( url )
+  return gltf.scene
+}
 
 function stopMixamoMixer() {
   if (mixamoMixer) {
@@ -128,6 +141,27 @@ function stopMixamoMixer() {
     mixamoMixer = null
     mixamoClock = null
   }
+}
+
+// FBXLoader produces one Skeleton per SkinnedMesh — citizen FBX has 8 meshes
+// (feet, legs, hands, chest, underwear, eyes, mouth, head), each with its own
+// 84-bone Skeleton instance. Verified empirically that all 8 skeletons share
+// identical inverseBindMatrices and same bone order. So we can make every
+// mesh point at the FIRST skeleton; updates to its bones then drive all
+// meshes' deformation through a single shared rig.
+function unifySkeletons( root ) {
+  if ( !root ) return false
+  const meshes = []
+  root.traverse( o => { if ( o.isSkinnedMesh ) meshes.push( o ) } )
+  if ( meshes.length < 2 ) return false
+  const master = meshes[ 0 ].skeleton
+  for ( let i = 1; i < meshes.length; i++ ) {
+    // Rebind without resetting bind matrix — keeps each mesh's own bind
+    // transform but switches the skeleton (bones + inverseBindMatrices).
+    meshes[ i ].bind( master, meshes[ i ].bindMatrix )
+  }
+  console.log( `[unifySkeletons] reassigned ${meshes.length - 1} meshes to mesh-0 skeleton (${master.bones.length} bones)` )
+  return true
 }
 
 async function loadCharacter(charConfig) {
@@ -147,11 +181,16 @@ async function loadCharacter(charConfig) {
     currentRoot = null
   }
 
-  const gltf = await gltfLoader.loadAsync(charConfig.url)
-  const root = gltf.scene
+  const root = await loadCharacterRoot( charConfig.url )
 
   root.scale.setScalar(charConfig.scale ?? 1.0)
   scene.add(root)
+
+  // Multi-mesh FBX (sbox citizen has 8 SkinnedMeshes each with their own bone
+  // copies) — unify all meshes onto the first mesh's skeleton BEFORE the
+  // animator captures bone pointers, so the animator and the meshes agree on
+  // which Bone instances to drive.
+  unifySkeletons( root )
 
   let skinned = null
   root.traverse(o => {
@@ -207,6 +246,25 @@ async function loadCharacter(charConfig) {
     alignMode: autoAlign,
   })
 
+  // Citizen-style rigs split skinning across "twist" bones (e.g.
+  // arm_upper_R_twist0/1) that aren't parented under their main bone, so
+  // rotating the main bone doesn't deform the mesh. Pair each twist bone
+  // with its main bone so the loop can copy main's world rotation onto it.
+  animator.twistPairs = []
+  const twistRe = /^(.+?)_twist\d+$/
+  const drivable = target.isSkinnedMesh ? target.skeleton.bones : []
+  for (const tbone of drivable) {
+    const m = twistRe.exec(tbone.name)
+    if (!m) continue
+    const mainBone = animator.bonesByName[animator._normName(m[1])]
+    if (mainBone && mainBone !== tbone) {
+      animator.twistPairs.push({ twist: tbone, main: mainBone })
+    }
+  }
+  if (animator.twistPairs.length) {
+    console.log(`[loadCharacter] paired ${animator.twistPairs.length} twist bones for '${charConfig.label}'`)
+  }
+
   currentRoot = root
   setStatus(`Loaded ${charConfig.label}. ${currentMotion ? 'Replaying.' : 'Type a prompt and Generate.'}`)
 
@@ -215,6 +273,7 @@ async function loadCharacter(charConfig) {
   window.__scene = scene
   window.__camera = camera
   window.__controls = controls
+  window.__animator = animator
   const allNames = []
   root.traverse(o => allNames.push(`${o.type}:${o.name || '(noname)'}`))
   console.log(`[loadCharacter] traversed ${allNames.length} objects in '${charConfig.label}':`, allNames)
@@ -734,6 +793,25 @@ function isRagdolling() {
   return true
 }
 
+const _twistTmpQ = new THREE.Quaternion()
+const _twistTmpP = new THREE.Vector3()
+const _twistTmpS = new THREE.Vector3()
+const _twistParentQ = new THREE.Quaternion()
+function syncTwistBones(a) {
+  if (!a?.twistPairs?.length) return
+  for (const { twist, main } of a.twistPairs) {
+    main.updateMatrixWorld(true)
+    main.matrixWorld.decompose(_twistTmpP, _twistTmpQ, _twistTmpS)
+    if (twist.parent) {
+      twist.parent.updateMatrixWorld(true)
+      twist.parent.matrixWorld.decompose(_twistTmpP, _twistParentQ, _twistTmpS)
+      twist.quaternion.copy(_twistParentQ.invert().multiply(_twistTmpQ))
+    } else {
+      twist.quaternion.copy(_twistTmpQ)
+    }
+  }
+}
+
 function tick() {
   const ragdolling = isRagdolling()
   if (ragdolling) {
@@ -742,6 +820,7 @@ function tick() {
     mixamoMixer.update(mixamoClock.getDelta())
   } else {
     animator?.update()
+    syncTwistBones(animator)
   }
   // BlockRagdoll in tracking mode: push the bones' new world transforms into
   // the kinematic bodies BEFORE world.step so Rapier can measure velocity.
