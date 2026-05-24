@@ -378,13 +378,27 @@ def bake(args):
     head_bone = armature.data.bones.get(CITIZEN_MAPPING["head"])
     if head_bone is None:
         raise RuntimeError("No head bone in armature")
-    pelvis_h = (armature.matrix_world @ pelvis_bone.head_local).z
-    head_h = (armature.matrix_world @ head_bone.head_local).z
-    char_height = head_h - pelvis_h  # approx
+    # Measure pelvis→head distance in ARMATURE-LOCAL units (citizen FBX is in
+    # cm, so this returns cm) AND compare against the SAME segment in SMPL-X
+    # canonical (also pelvis→head in meters). Like-to-like gives the unit
+    # conversion factor for translating kimodo's meter positions into the
+    # bone's location-keyframe frame.
+    pelvis_h_local = pelvis_bone.head_local.y  # Y is up in armature-local
+    head_h_local = head_bone.head_local.y
+    char_height = head_h_local - pelvis_h_local  # citizen pelvis→head, cm
+    smplx_pelvis_to_head = (
+        SMPLX_REST_WORLD["head"][1] - SMPLX_REST_WORLD["pelvis"][1]
+    )
     pelvis_world_rest = (armature.matrix_world @ pelvis_bone.head_local)
-    # If the FBX is in cm (typical for citizen), char_height ~ 150ish; in meters ~1.5.
-    pelvis_scale = char_height / SMPLX_HEIGHT_M if char_height > 0 else 1.0
-    print(f"[bake] char_height={char_height:.3f} pelvis_scale={pelvis_scale:.4f}")
+    pelvis_scale = (
+        char_height / smplx_pelvis_to_head if smplx_pelvis_to_head > 0 else 1.0
+    )
+    # kimodo's root_positions is the pelvis WORLD position in the clip
+    # (typically pelvis ~1m off the ground, standing). Subtract the clip's
+    # own first frame so the delta is measured from the clip's start —
+    # citizen lands at its bind at t=0, then moves the right amount over
+    # the clip. Computed per-clip in the per-frame loop below.
+    print(f"[bake] char_height={char_height:.2f}cm  smplx_pelvis_to_head={smplx_pelvis_to_head:.3f}m  pelvis_scale={pelvis_scale:.2f}")
 
     # Virtual T-pose: for arm bones, replace the A-pose bind rotation with
     # what the bone would have if posed to SMPL-X canonical direction. This
@@ -480,18 +494,36 @@ def bake(args):
             pb.keyframe_insert("rotation_quaternion", frame=f + 1)
 
         # Pelvis translation from kimodo root_positions (meters).
+        # Set pose_bone.matrix preserving the rotation set earlier in this
+        # loop. Letting Blender solve matrix_basis avoids manual frame math
+        # that mapped kimodo Y into the wrong armature-local axis.
         if root_positions is not None:
             pelvis_pb = pose_bones.get(pelvis_name)
             if pelvis_pb is not None:
                 rp = root_positions[f]
-                # kimodo: right-handed Y-up meters. Blender is Z-up so swap.
-                target_world_pos = Vector((rp[0], -rp[2], rp[1])) * (char_height / SMPLX_HEIGHT_M)
-                delta_world = target_world_pos - pelvis_world_rest
-                pelvis_rest_q = rest_armature[pelvis_name]
-                pelvis_pb.location = pelvis_rest_q.inverted() @ delta_world
+                rp0 = root_positions[0]
+                # kimodo:  X=lateral, Y=vertical, Z=forward
+                # citizen pelvis bone-local (from matrix_local columns):
+                #   bone-X → armature Y (up)
+                #   bone-Y → armature Z (forward)
+                #   bone-Z → armature X (lateral)
+                # pose_bone.location is in bone-local, so map accordingly so
+                # the engine renders forward/up/lateral correctly.
+                dx = rp[0] - rp0[0]
+                dy = rp[1] - rp0[1]
+                dz = rp[2] - rp0[2]
+                pelvis_pb.location = Vector((dy, dz, dx)) * pelvis_scale
                 pelvis_pb.keyframe_insert("location", frame=f + 1)
 
         bpy.context.view_layer.update()
+
+    # Critical: reset scene to frame 1 before export. Without this,
+    # bake_anim picks up the scene's current (last-frame) pose and writes
+    # weird offsets that produce reversed-looking location keyframes on
+    # re-import. With scene at frame 1 first, bake_anim walks frames in
+    # order and writes correct values.
+    scene.frame_set(1)
+    bpy.context.view_layer.update()
 
     print(f"[bake] exporting {args.out}")
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -506,7 +538,7 @@ def bake(args):
         bake_anim_use_all_bones=True,
         bake_anim_use_nla_strips=False,
         bake_anim_use_all_actions=False,
-        bake_anim_force_startend_keying=True,
+        bake_anim_force_startend_keying=False,
         bake_anim_step=1.0,
         bake_anim_simplify_factor=0.0,
         add_leaf_bones=False,
