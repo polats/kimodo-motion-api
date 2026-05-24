@@ -17,6 +17,9 @@ VMDL_HEADER = '<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa
 
 
 def emit_anim_file(addon_rel_path: str, name: str) -> str:
+    # framerate = 30 explicit (kimodo clips are baked at 30 fps). With
+    # framerate = 0, the engine computes Sequence.Duration = 0 and the
+    # sequence freezes on frame 1 — verified failure mode.
     return dedent(f'''\
             {{
                 _class = "AnimFile"
@@ -24,9 +27,9 @@ def emit_anim_file(addon_rel_path: str, name: str) -> str:
                 source_filename = "{addon_rel_path}"
                 start_frame = -1
                 end_frame = -1
-                framerate = 0.0
+                framerate = 30.0
                 take = ""
-                looping = false
+                looping = true
                 delta = false
                 worldSpace = false
             }},''')
@@ -51,7 +54,9 @@ def build_vmdl(clip_dir: Path, addon_assets_root: Path, base_model: str) -> str:
     entries = []
     for fbx in fbxs:
         rel = find_addon_rel(fbx, addon_assets_root)
-        name = fbx.stem
+        # Prefix "kim_" so runtime code can reliably distinguish our clips
+        # from inherited base_model (citizen) clips.
+        name = f"kim_{fbx.stem}"
         entries.append(emit_anim_file(rel, name))
 
     body = "\n".join("\t\t\t\t" + e.replace("\n", "\n\t\t\t\t") for e in entries)
