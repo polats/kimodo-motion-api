@@ -20,6 +20,17 @@ def emit_anim_file(addon_rel_path: str, name: str) -> str:
     # framerate = 30 explicit (kimodo clips are baked at 30 fps). With
     # framerate = 0, the engine computes Sequence.Duration = 0 and the
     # sequence freezes on frame 1 — verified failure mode.
+    #
+    # ExtractMotion child: pulls the pelvis's HORIZONTAL translation out of
+    # the bone and exposes it to the engine as SceneModel.RootMotion (a
+    # per-frame Transform delta). This is how citizen's own run/walk work
+    # (see citizen_ani_process_run.vmdl_prefab). Without it RootMotion is
+    # always zero and the pelvis motion stays baked in the bone — meaning
+    # the collider never follows and the mesh double-moves.
+    #   extract_tx/ty = true  → horizontal becomes root motion (collider moves)
+    #   extract_tz    = false → vertical bob stays in the mesh (jumps still bob)
+    #   root_bone_name = pelvis → our root bone (citizen base skeleton)
+    #   motion_type   = Single → extract the actual per-frame motion
     return dedent(f'''\
             {{
                 _class = "AnimFile"
@@ -32,6 +43,20 @@ def emit_anim_file(addon_rel_path: str, name: str) -> str:
                 looping = true
                 delta = false
                 worldSpace = false
+                children =
+                [
+                    {{
+                        _class = "ExtractMotion"
+                        extract_tx = true
+                        extract_ty = true
+                        extract_tz = false
+                        extract_rz = false
+                        linear = false
+                        quadratic = false
+                        root_bone_name = "pelvis"
+                        motion_type = "Single"
+                    }},
+                ]
             }},''')
 
 

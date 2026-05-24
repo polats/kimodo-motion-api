@@ -57,6 +57,9 @@ vmdl wrapper ──────────► gen_vmdl.py
                           │
                           ├── Walk *.fbx in clip dir
                           ├── Emit one AnimFile per FBX (start/end=-1, take="")
+                          ├── Add an ExtractMotion child per AnimFile so the
+                          │   engine exposes pelvis translation as RootMotion
+                          │   (see "Root motion & collision" below)
                           └── Set base_model_name + ModelModifier_ScaleAndMirror
 ```
 
@@ -104,6 +107,99 @@ match what the citizen mesh's skin weights expect.
 `root_positions` is meters at SMPL-X scale. Scale by `char_height /
 SMPLX_HEIGHT_M`, swap Y/Z (kimodo Y-up vs Blender Z-up), express as
 bone-local delta from pelvis rest, keyframe `pelvis_pb.location`.
+
+## Root motion & collision
+
+Getting the *animation* on the character is only half the job. To make the
+character physically translate with locomotion clips — and stop when it hits
+something — the baked pelvis motion has to become engine **root motion** and
+drive a `CharacterController`. Three things must line up; miss any one and the
+character either runs in place or doesn't collide.
+
+### 1. `ExtractMotion` node in the vmdl (baker side)
+
+s&box has first-class root motion: `SkinnedModelRenderer.RootMotion` is a
+per-frame `Transform` delta the engine computes — and it works **without an
+animgraph** when you drive `CurrentSequence` directly. But it is *zero* unless
+the animation has a motion-extraction node. Citizen's own run/walk do this in
+their `*_ani_process_*.vmdl_prefab` files; we replicate it inline on every
+`AnimFile`:
+
+```kv3
+_class = "ExtractMotion"
+extract_tx = true        // horizontal → becomes RootMotion (collider moves)
+extract_ty = true
+extract_tz = false       // vertical bob stays in the mesh (jumps still bob)
+extract_rz = false
+linear = false
+quadratic = false
+root_bone_name = "pelvis"
+motion_type = "Single"
+```
+
+`gen_vmdl.py` emits this automatically. Bonus: extracting the horizontal pelvis
+motion out of the bone also **kills the double-move** — the mesh no longer
+translates twice (once from the root, once from the still-animated pelvis).
+
+Verify with a throwaway `SceneModel` (no scene needed):
+
+```csharp
+var sm = new SceneModel(new SceneWorld(), Model.Load("models/kimodo/kimodo_anims.vmdl"), Transform.Zero);
+sm.UseAnimGraph = false;
+sm.CurrentSequence.Name = "kim_run_forward";
+sm.Update(0f);
+for (int i = 0; i < 10; i++) { sm.Update(1f/30f); Log.Info(sm.RootMotion.Position); }
+// should print growing non-zero deltas; all-zero means ExtractMotion is missing
+```
+
+### 2. Runtime component (s&box side — `KimodoSequencePlayer.cs`)
+
+Each tick: read `Target.RootMotion.Position` (model-local delta) → rotate by
+`WorldRotation` → feed `CharacterController.MoveTo(pos + delta, useStep:false)`.
+`useStep:false` means no step-up, so the character can't climb or punch through
+what it runs into — it just stops and the clip cycles in place against the wall.
+
+Two guards are required in practice:
+- **Warm-up:** skip the first tick after `Play()`. The first `RootMotion` read
+  straddles the sequence switch and returns a garbage (huge) delta.
+- **`MaxSpeed` clamp:** cap per-frame delta to `MaxSpeed * Time.Delta`. See the
+  clip-quality caveat below — without it the character accelerates until it
+  punches through colliders.
+
+### 3. Scene wiring (editor side)
+
+On the character GameObject:
+- `SkinnedModelRenderer` — `Model = …/kimodo_anims.vmdl`, `UseAnimGraph = false`
+- `CharacterController` — e.g. `Radius 16`, `Height 72`, `StepHeight 18`
+- `KimodoSequencePlayer` — `Target` → the renderer, `Controller` → the
+  CharacterController, `PropagateRootMotion = true`
+
+The obstacle needs an actual collider (e.g. a `BoxCollider`, `Static = true`).
+
+### Works for non-kimodo clips too
+
+The same path drives citizen base_model clips with no special-casing. Citizen
+locomotion (`Run_N`, `CrouchWalk_N`, …) produces clean, drift-free, steady root
+motion (their `ani_process` prefabs already bake proper `ExtractMotion` +
+`AnimAlign`). Non-locomotion clips (idles, expressions, poses) report zero root
+motion, so the component does nothing and they play in place — correct.
+
+### Clip-quality caveat: our locomotion bakes are not clean loops
+
+The kimodo `run_forward` / `walk_forward` source captures are
+"accelerate-from-standstill" motions, not steady-state loops:
+- **Unbounded acceleration:** within each loop the extracted per-frame delta
+  ramps (~0.6 → ~7.4 cm/frame at 30 fps) and resets at the loop boundary.
+  Unclamped, the character keeps speeding up until it tunnels through walls —
+  hence the `MaxSpeed` clamp. (Citizen's clips don't need it; the clamp will
+  slightly cap their faster runs, so raise it per-character if needed.)
+- **Lateral drift:** `run_forward` drifts ~0.5 m sideways over the clip, so the
+  character hits a narrow obstacle off-axis and slides around it instead of
+  stopping dead. Against a wide wall it stops cleanly.
+
+The clean long-term fix is bake-side: trim locomotion clips to their
+steady-velocity portion (≈ frame 48+ for `run_forward`) and zero lateral drift,
+then the `MaxSpeed` clamp can be removed.
 
 ## Gotchas (the trail we walked)
 
@@ -217,6 +313,18 @@ having real data, check:
 `bpy.ops.nla.bake` is an alternative path but it crashes silently in
 background mode (no UI context).
 
+### 11. `RootMotion` is zero without an `ExtractMotion` node
+
+The character animated correctly but never physically moved, and its collider
+never followed. `SkinnedModelRenderer.RootMotion` returned `0,0,0` every frame
+because the pelvis translation stayed baked in the bone — the engine only
+exposes it as root motion if the AnimFile carries an `ExtractMotion` node.
+
+**Fix:** `gen_vmdl.py` emits one per AnimFile. Full detail in
+"Root motion & collision" above. Related runtime traps once it's non-zero:
+first-frame-after-switch spike (needs a warm-up skip) and the clips'
+unbounded acceleration (needs a speed clamp).
+
 ## Output FBX export settings (final)
 
 ```python
@@ -253,5 +361,5 @@ distorted geometry, the bind round-trip is broken (probably
 
 - `bake.py` — main baker, takes one kimodo JSON, produces one FBX
 - `batch_bake.py` — curated multi-clip wrapper (edit `CURATED` dict to add clips)
-- `gen_vmdl.py` — emits the wrapper vmdl from a directory of baked FBXs
+- `gen_vmdl.py` — emits the wrapper vmdl (AnimFile + ExtractMotion + ScaleAndMirror) from a directory of baked FBXs
 - `make_tpose_clip.py` — synthetic identity-pose JSON for the verification gate
