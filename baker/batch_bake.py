@@ -34,6 +34,8 @@ CURATED = {
     "jump_in_place": "36fd6d258692",
     "point_forward": "f5de3080fdbf",
     "kick_forward": "8b9b58e5de2d",
+    "read_newspaper": "acf1468b0ac3",
+    "drink": "20141ea97efe",
 }
 
 
