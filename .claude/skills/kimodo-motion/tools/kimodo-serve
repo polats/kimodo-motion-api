@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# kimodo-serve — start the kimodo server stack (text-encoder + motion API) via
+# docker compose and wait until the motion API answers. Idempotent.
+#
+#   kimodo-serve            start + wait healthy
+#   kimodo-serve --status   show container + API status
+#   kimodo-serve --logs     tail the motion API (demo) container logs
+#   kimodo-serve --down     stop the stack
+set -uo pipefail
+source "$(dirname "$0")/_kimodo-env.sh"
+KDIR="$(km_resolve_dir)"
+
+case "${1:-up}" in
+  --status)
+    k_head "containers"; docker compose -f "$KDIR/docker-compose.yaml" ps 2>/dev/null
+    k_head "motion API ($KIMODO_URL)"; km_api_up && k_ok "reachable" || k_warn "not reachable"
+    exit 0 ;;
+  --logs)
+    exec docker logs --tail "${2:-40}" -f demo ;;
+  --down)
+    k_head "stopping kimodo stack"; exec docker compose -f "$KDIR/docker-compose.yaml" down ;;
+esac
+
+if km_api_up; then k_ok "motion API already up at $KIMODO_URL"; exit 0; fi
+
+k_head "starting kimodo stack (docker compose up -d)"
+docker compose -f "$KDIR/docker-compose.yaml" up -d 2>&1 | sed 's/^/  /' \
+  || k_die "docker compose up failed (try: kimodo-doctor)"
+
+# The motion API loads the diffusion model into VRAM on boot; poll until ready.
+printf '  waiting for motion API at %s ' "$KIMODO_URL"
+for i in $(seq 1 60); do
+  if km_api_up; then printf '\n'; k_ok "ready after ~$((i*3))s"; exit 0; fi
+  printf '.'; sleep 3
+done
+printf '\n'; k_die "motion API didn't come up in 180s — check: kimodo-serve --logs"

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# kimodo-view — start the three.js web viewer (kimodo/web, vite) so you can
+# preview generated clips in a browser. It reads the motion API at KIMODO_URL.
+#
+#   kimodo-view          start (if not already up) → http://localhost:5173
+#   kimodo-view --down   stop the viewer
+set -uo pipefail
+source "$(dirname "$0")/_kimodo-env.sh"
+KDIR="$(km_resolve_dir)"
+WEB="$KDIR/web"
+PIDF="${TMPDIR:-/tmp}/kimodo-view.pid"
+LOG="${TMPDIR:-/tmp}/kimodo-view.log"
+URL="http://localhost:5173"
+
+[ -d "$WEB" ] || k_die "no web/ viewer in $KDIR"
+
+if [ "${1:-}" = "--down" ]; then
+  if [ -f "$PIDF" ] && kill "$(cat "$PIDF")" 2>/dev/null; then rm -f "$PIDF"; k_ok "viewer stopped"; else k_warn "no viewer running (pidfile $PIDF)"; fi
+  exit 0
+fi
+
+if curl -fsS -o /dev/null "$URL/" 2>/dev/null; then k_ok "viewer already up at $URL"; exit 0; fi
+command -v npm >/dev/null 2>&1 || k_die "npm not found (the viewer is a vite app; install Node)"
+[ -d "$WEB/node_modules" ] || { k_head "installing web deps"; ( cd "$WEB" && npm install ) || k_die "npm install failed"; }
+
+k_head "starting viewer (vite, points at $KIMODO_URL)"
+( cd "$WEB" && VITE_KIMODO_URL="$KIMODO_URL" nohup npm run dev >"$LOG" 2>&1 & echo $! >"$PIDF" )
+for i in $(seq 1 20); do
+  if curl -fsS -o /dev/null "$URL/" 2>/dev/null; then k_ok "viewer at $URL"; exit 0; fi
+  sleep 1
+done
+k_warn "viewer still starting — open $URL (logs: $LOG)"

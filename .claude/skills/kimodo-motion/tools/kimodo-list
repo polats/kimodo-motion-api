@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# kimodo-list — list saved animations on the motion API (newest first).
+#
+#   kimodo-list           table: id · length · prompt
+#   kimodo-list --json    raw JSON
+#   kimodo-list <substr>  filter by prompt substring
+set -uo pipefail
+source "$(dirname "$0")/_kimodo-env.sh"
+km_api_up || k_die "motion API not reachable at $KIMODO_URL — run kimodo-serve"
+
+raw="$(km_api_get /animations)" || k_die "couldn't fetch /animations"
+
+if [ "${1:-}" = "--json" ]; then printf '%s\n' "$raw"; exit 0; fi
+
+KRAW="$raw" KFILTER="${1:-}" python3 - <<'PY'
+import os, json
+flt = os.environ.get("KFILTER", "").lower()
+anims = json.loads(os.environ["KRAW"]).get("animations", [])
+anims.sort(key=lambda a: a.get("created_at", 0), reverse=True)
+rows = [a for a in anims if flt in a.get("prompt", "").lower()]
+hdr = f"{len(rows)} animation(s)" + (f' matching "{flt}"' if flt else "") + ":"
+print(hdr + "\n")
+for a in rows:
+    secs = a.get("seconds") or (a.get("num_frames", 0) / (a.get("fps") or 30))
+    print(f"  {a.get('id'):>12}  {secs:>4.1f}s  {a.get('prompt','')[:78]}")
+PY

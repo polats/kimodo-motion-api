@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# kimodo-gen — generate a motion clip from a text prompt via the motion API.
+# Prints the new clip id (and frame/length summary). The clip is auto-saved
+# server-side into .kimodo-animations/ and shows up in kimodo-list / the viewer.
+#
+#   kimodo-gen "a person waves hello with their right hand"
+#   kimodo-gen "a person sits and crosses their legs" 4.5
+#
+# Arg 2 = seconds (default 5). Tips for good clips: one clear action, name the
+# body part, keep it ~3-6s. See rules/generating.md.
+set -uo pipefail
+source "$(dirname "$0")/_kimodo-env.sh"
+
+prompt="${1:-}"
+seconds="${2:-5}"
+[ -n "$prompt" ] || k_die 'usage: kimodo-gen "<prompt>" [seconds]'
+km_api_up || k_die "motion API not reachable at $KIMODO_URL — run kimodo-serve"
+
+payload="$(KP="$prompt" KS="$seconds" python3 -c 'import json,os; print(json.dumps({"prompt":os.environ["KP"],"seconds":float(os.environ["KS"])}))')"
+
+resp="$(curl -fsS -X POST "${KIMODO_URL%/}/generate" -H 'Content-Type: application/json' -d "$payload")" \
+  || k_die "generate failed (is the model loaded? kimodo-serve --logs)"
+
+# The /generate response carries the full motion arrays (~1MB) — too big for an
+# env var, so pipe it via stdin and keep the (small) parse script in -c.
+parse_py="$(cat <<'PY'
+import sys, json
+d = json.load(sys.stdin)
+print(d.get("id", ""))
+print(f"  prompt : {d.get('prompt')}")
+print(f"  length : {d.get('num_frames')} frames @ {d.get('fps')} fps ({d.get('seconds')}s)")
+PY
+)"
+parsed="$(printf '%s' "$resp" | python3 -c "$parse_py")"
+k_ok "generated $(printf '%s\n' "$parsed" | head -1)"
+printf '%s\n' "$parsed" | tail -n +2
+echo "  preview: kimodo-view (the clip appears in the saved list)"

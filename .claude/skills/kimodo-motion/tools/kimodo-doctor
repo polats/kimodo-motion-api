@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# kimodo-doctor — verify the local kimodo setup before generating.
+#
+# Checks: docker, NVIDIA GPU + VRAM, the kimodo:1.0 image, a kimodo checkout
+# (KIMODO_DIR), the compose services, and whether the motion API answers.
+set -uo pipefail
+source "$(dirname "$0")/_kimodo-env.sh"
+
+fails=0
+note() { fails=$((fails+1)); }
+
+k_head "kimodo checkout"
+if KDIR="$(km_resolve_dir 2>/dev/null)"; then
+  k_ok "KIMODO_DIR = $KDIR"
+  [ -f "$KDIR/docker-compose.yaml" ] && k_ok "docker-compose.yaml present" || { k_bad "no docker-compose.yaml"; note; }
+  [ -d "$KDIR/baker" ] && k_ok "baker/ present (s&box bakes available)" || k_warn "no baker/ (FBX bake unavailable)"
+else
+  k_bad "no kimodo checkout found — set KIMODO_DIR to your kimodo repo path"; note; KDIR=""
+fi
+
+k_head "docker"
+if command -v docker >/dev/null 2>&1; then
+  k_ok "docker on PATH"
+  if docker info >/dev/null 2>&1; then k_ok "docker daemon reachable"; else k_bad "docker daemon not reachable (start docker / check permissions)"; note; fi
+  if docker image inspect kimodo:1.0 >/dev/null 2>&1; then
+    k_ok "kimodo:1.0 image built"
+  else
+    k_warn "kimodo:1.0 image not built — first 'kimodo-serve' will 'docker compose build' it"
+  fi
+else
+  k_bad "docker not found (docker-first setup; see rules/setup.md for the pip alternative)"; note
+fi
+
+k_head "GPU"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  gpu="$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1)"
+  if [ -n "$gpu" ]; then
+    k_ok "NVIDIA GPU: $gpu"
+    mib="$(printf '%s' "$gpu" | grep -oE '[0-9]+ MiB' | grep -oE '[0-9]+')"
+    [ -n "$mib" ] && [ "$mib" -lt 17000 ] && { k_warn "<17GB VRAM — set TEXT_ENCODER_DEVICE=cpu (compose already does) and expect slower runs"; }
+  else
+    k_warn "nvidia-smi present but no GPU reported"
+  fi
+else
+  k_warn "no nvidia-smi — generation needs CUDA; CPU-only will be very slow"
+fi
+
+k_head "motion API ($KIMODO_URL)"
+if km_api_up; then
+  n="$(km_api_get /animations 2>/dev/null | grep -o '"id"' | wc -l | tr -d ' ')"
+  k_ok "reachable — $n saved animation(s)"
+else
+  k_warn "not reachable — run 'kimodo-serve' to start it"
+fi
+
+if [ "$fails" -gt 0 ]; then
+  printf '\n%s%d blocking issue(s).%s See rules/setup.md.\n' "$C_R" "$fails" "$C_0"; exit 1
+fi
+printf '\n%sready.%s Next: kimodo-serve, then kimodo-gen "<prompt>".\n' "$C_G" "$C_0"

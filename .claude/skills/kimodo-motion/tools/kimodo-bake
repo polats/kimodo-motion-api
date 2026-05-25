@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# kimodo-bake — bake one saved clip into an s&box citizen FBX and (re)generate
+# the wrapper vmdl, so it becomes a `kim_<name>` sequence the engine can play.
+# This is the s&box-specific export path; see rules/sbox-integration.md.
+#
+#   kimodo-bake <name> <clip-id> --out <models-dir> [--citizen-fbx <path>] [--base-model <vmdl>]
+#
+# <name>     slug for the output (→ kim_<name> sequence, <name>.fbx)
+# <clip-id>  a saved clip id (see kimodo-list)
+# --out      target dir, e.g. <project>/Assets/models/kimodo
+#
+# Needs Blender 3.6+ on PATH and the citizen REF fbx (autodetected from a Steam
+# s&box install, or pass --citizen-fbx).
+set -uo pipefail
+source "$(dirname "$0")/_kimodo-env.sh"
+KDIR="$(km_resolve_dir)"
+
+name="${1:-}"; clip="${2:-}"; shift 2 2>/dev/null || true
+OUT=""; CIT=""; BASE="models/citizen_human/citizen_human_male.vmdl"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out)         OUT="$2"; shift 2 ;;
+    --citizen-fbx) CIT="$2"; shift 2 ;;
+    --base-model)  BASE="$2"; shift 2 ;;
+    *) k_die "unknown arg: $1" ;;
+  esac
+done
+
+[ -n "$name" ] && [ -n "$clip" ] && [ -n "$OUT" ] \
+  || k_die 'usage: kimodo-bake <name> <clip-id> --out <dir> [--citizen-fbx <path>] [--base-model <vmdl>]'
+command -v blender >/dev/null 2>&1 || k_die "blender not on PATH (baker needs Blender 3.6+)"
+[ -d "$KDIR/baker" ] || k_die "no baker/ in $KDIR"
+
+if [ -z "$CIT" ]; then
+  guess="$HOME/.local/share/Steam/steamapps/common/sbox/addons/citizen/Assets/models/citizen_human/citizen_human_male_REF.fbx"
+  [ -f "$guess" ] && CIT="$guess"
+fi
+[ -n "$CIT" ] && [ -f "$CIT" ] || k_die "citizen REF fbx not found — pass --citizen-fbx <path> (see rules/sbox-integration.md)"
+
+clipjson="$KDIR/.kimodo-animations/$clip.json"
+[ -f "$clipjson" ] || k_die "clip '$clip' not found at $clipjson (run kimodo-list to find ids)"
+
+mkdir -p "$OUT"
+k_head "baking $name (clip $clip) → $OUT/$name.fbx"
+blender --background --python "$KDIR/baker/bake.py" -- \
+  --citizen-fbx "$CIT" --clip "$clipjson" --out "$OUT/$name.fbx" --clip-name "$name" 2>&1 | tail -4
+[ -f "$OUT/$name.fbx" ] || k_die "bake produced no fbx — see output above"
+k_ok "baked $name.fbx"
+
+k_head "regenerating wrapper vmdl (all clips in $OUT)"
+python3 "$KDIR/baker/gen_vmdl.py" --clip-dir "$OUT" --out "$OUT/kimodo_anims.vmdl" --base-model "$BASE" 2>&1 | tail -2
+k_ok "kim_$name is now a sequence in kimodo_anims.vmdl — recompile in-engine to use it"
