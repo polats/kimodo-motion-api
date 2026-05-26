@@ -59,6 +59,16 @@ SLOT_LAYER = {"head": 3, "face": 4, "torso_under": 1, "torso_over": 2, "legs": 1
 def sh(cmd, **kw):
     return subprocess.run([str(c) for c in cmd], capture_output=True, text=True, **kw)
 
+def load_clothing(path):
+    # Source .clothing is JSON. Cloud packages ship compiled .clothing_c, but the
+    # DATA block embeds the full source JSON as a string — pull it back out.
+    if str(path).endswith(".clothing_c"):
+        raw = open(path, "rb").read().decode("latin-1", "ignore")
+        m = re.search(r'\{"HasHumanSkin".*?"__version":\s*\d+\s*\}', raw)
+        if not m: raise ValueError(f"no embedded clothing JSON in {path}")
+        return json.loads(m.group(0))
+    return json.load(open(path))
+
 def find_ci(root, name):   # case-insensitive find of a basename under root
     hits = glob.glob(str(Path(root) / "**" / name), recursive=True)
     if hits: return hits[0]
@@ -68,8 +78,15 @@ def find_ci(root, name):   # case-insensitive find of a basename under root
     return None
 
 def vmdl_c_for(item_dir, vmdl_path):
+    # install: <basename>.vmdl_c next to the .clothing; cloud (download/assets): the
+    # file is content-addressed as <stem>.<hash>.vmdl_c, so match by stem too.
     if not vmdl_path: return None
-    return find_ci(item_dir, os.path.basename(vmdl_path) + "_c")
+    base = os.path.basename(vmdl_path)
+    exact = find_ci(item_dir, base + "_c")
+    if exact: return exact
+    stem = os.path.splitext(base)[0]
+    hits = glob.glob(str(Path(item_dir) / "**" / f"{stem}.*.vmdl_c"), recursive=True)
+    return hits[0] if hits else None
 
 def decompile(src, out_glb):
     out_glb = Path(out_glb)
@@ -87,10 +104,18 @@ def extract_albedo(item_dir, out_dir, model_stem):
     cands = glob.glob(str(Path(item_dir) / "**" / "*color*.vtex_c"), recursive=True) \
         or glob.glob(str(Path(item_dir) / "**" / "*albedo*.vtex_c"), recursive=True)
     if not cands: return None
+    nolens = lambda xs: [c for c in xs if "lens" not in os.path.basename(c).lower()]
     ms = (model_stem or "").lower()
     pref = [c for c in cands if os.path.basename(c).lower().startswith(ms)] if ms else []
-    non_lens = [c for c in pref if "lens" not in os.path.basename(c).lower()]
-    cands = non_lens or pref or cands
+    chosen = nolens(pref) or pref
+    if not chosen:
+        # No name match. In a flat shared dir (download/assets) that means a neighbour's
+        # texture — skip it. In a scoped package subdir (the item's own folder, incl. cloud
+        # <pkg>/body|legs/) the only colour map present IS this garment's, so take it.
+        if Path(item_dir).name == "assets":
+            return None
+        chosen = nolens(cands) or cands
+    cands = chosen
     out_dir = Path(out_dir)
     if out_dir.exists():
         for f in out_dir.glob("**/*.png"): f.unlink()
@@ -110,8 +135,9 @@ def rig(body, ref_fbx, garment_glb, out_glb, tex_png):
 
 def add(clothing_path):
     cp = Path(clothing_path); item_dir = cp.parent
-    d = json.load(open(cp))
-    gid = cp.stem
+    d = load_clothing(cp)
+    gid = re.sub(r"\.[0-9a-f]{8,}$", "", cp.stem)   # strip cloud content-hash: poncho.1002c5… → poncho
+    gid = re.sub(r"\.clothing$", "", gid)            # .clothing_c stems keep no extra suffix
     label = d.get("Title") or gid.replace("_", " ").title()
     cat = d.get("Category", "")
     slot = CATEGORY_SLOT.get(cat)

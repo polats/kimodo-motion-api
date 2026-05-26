@@ -249,6 +249,13 @@ python3 web/scripts/clothing_add.py \
 - **Manifest** `.kimodo-clothing/<id>.json`: `{ id, label, category, slot, layer,
   slotsUnder, slotsOver, hideBody, glb: { unirig_citizen, unirig_citizen_male,
   unirig_citizen_female } }`.
+- **Community / cloud clothing** (sbox.game packages, e.g. `lostick.kimono`): mount the
+  package in s&box first so it downloads to `…/sbox/download/assets/` (see the
+  `sbox-gamedev` skill's `rules/cloud-assets.md` — `Package.FetchAsync`/`MountAsync` via
+  `sbox-eval`), then point `clothing_add.py` at the downloaded **`.clothing_c`**. The tool
+  reads its embedded JSON, resolves the content-hashed `<stem>.<hash>.vmdl_c` variants
+  (recursive search under the item dir), and scopes the albedo to the package subdir.
+  Verified with `lostick.kimono` + `lostick.kimonotrousers`.
 - **Prereqs:** the **VRF CLI** (`Source2Viewer-CLI`) — kept at
   `~/.local/share/source2viewer/` (the tool also falls back to `/tmp/vrf/cli`, or set
   `KIMODO_VRF`). If missing, download `cli-linux-x64.zip` from the ValveResourceFormat
