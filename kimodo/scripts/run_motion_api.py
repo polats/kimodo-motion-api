@@ -111,6 +111,13 @@ class StitchPathRequest(BaseModel):
     save: bool = False        # also persist as a store record (else just return for playback)
 
 
+class RotateClipRequest(BaseModel):
+    # Bake a yaw (about the world Y at the XZ origin) into a clip's data and save
+    # it as a new clip — so "facing" is part of the animation, not a side param.
+    id: str
+    degrees: float = 0.0
+
+
 def _passthrough(iterable, *args, **kwargs):
     return iterable
 
@@ -607,6 +614,37 @@ def build_app() -> FastAPI:
         if req.save:
             record["id"] = store.save(record)
         return record
+
+    @app.post("/rotate_clip")
+    def rotate_clip(req: RotateClipRequest) -> dict:
+        """Yaw the whole clip about world-Y at the XZ origin (matches three.js
+        root.rotation.y) and save it as a new clip — the rotation is baked into the
+        arrays, so facing needs no extra parameter downstream."""
+        rec = store.get(req.id)
+        if rec is None:
+            raise HTTPException(404, f"clip '{req.id}' not found")
+        theta = math.radians(float(req.degrees))
+        c, s = math.cos(theta), math.sin(theta)
+        R = np.asarray(rec["root_positions"], np.float32).copy()
+        P = np.asarray(rec["posed_joints"], np.float32).copy()
+        G = np.asarray(rec["global_quats_xyzw"], np.float32).copy()   # xyzw
+        L = np.asarray(rec["local_quats_wxyz"], np.float32).copy()    # wxyz
+        # rotate XZ about the origin: x' = x c + z s, z' = -x s + z c
+        rx, rz = R[:, 0].copy(), R[:, 2].copy()
+        R[:, 0], R[:, 2] = rx * c + rz * s, -rx * s + rz * c
+        px, pz = P[..., 0].copy(), P[..., 2].copy()
+        P[..., 0], P[..., 2] = px * c + pz * s, -px * s + pz * c
+        # premultiply every joint's global orientation by qY(theta) (xyzw)
+        qy, qw = math.sin(theta / 2), math.cos(theta / 2)
+        gx, gy, gz, gw = (G[..., i].copy() for i in range(4))
+        G[..., 0] = qw * gx + qy * gz
+        G[..., 1] = qw * gy + qy * gw
+        G[..., 2] = qw * gz - qy * gx
+        G[..., 3] = qw * gw - qy * gy
+        # the root's local quat == its global; keep them consistent (wxyz)
+        L[:, 0, 0], L[:, 0, 1], L[:, 0, 2], L[:, 0, 3] = G[:, 0, 3], G[:, 0, 0], G[:, 0, 1], G[:, 0, 2]
+        arr = {"local_quats_wxyz": L, "global_quats_xyzw": G, "root_positions": R, "posed_joints": P}
+        return _save_arrays(rec.get("prompt", req.id), float(L.shape[0]) / fps, arr, None)
 
     @app.get("/animations")
     def list_animations() -> dict:

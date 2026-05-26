@@ -7,7 +7,11 @@
   <style>
     * { margin: 0; box-sizing: border-box; }
     body { font-family: system-ui, sans-serif; background: #1a1a1a; color: #ddd; overflow: hidden; }
-    #app { position: fixed; inset: 0; }
+    #app { position: fixed; top: 0; right: 0; bottom: 0; left: 480px; }   /* viewer area, right of the panel */
+    #axis-gizmo { position: fixed; top: 12px; right: 12px; z-index: 10; display: flex; gap: 5px; }
+    .axis-btn { width: 30px; height: 30px; border-radius: 7px; font-weight: 700; font-size: 13px; cursor: pointer; border: 1px solid #0006; background: rgba(40,40,46,0.85); backdrop-filter: blur(4px); }
+    .axis-btn:hover { background: rgba(62,62,70,0.95); }
+    .ax-x { color: #ff8a8a; } .ax-y { color: #8ee08e; } .ax-z { color: #8ab8ff; }
     #panel {
       position: fixed; top: 0; left: 0; width: 480px; height: 100%;
       background: rgba(28,28,30,0.82); backdrop-filter: blur(6px);
@@ -60,9 +64,42 @@
       padding: 12px; overflow-y: auto; transform: translateX(-100%); transition: transform .22s ease;
     }
     #actions-drawer.open { transform: translateX(0); }
-    .action-card { background: #26262b; border: 1px solid #3a3a40; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
-    .action-card .nm { font-size: 13px; font-weight: 600; color: #e3e3e8; }
-    .action-card .pr { font-size: 11px; color: #888; margin: 2px 0 7px; line-height: 1.35; }
+    .action-card { position: relative; background: #26262b; border: 1px solid #3a3a40; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
+    .action-card .nm { font-size: 13px; font-weight: 600; color: #e3e3e8; padding-right: 18px; }
+    .action-card .dur-badge { font-size: 10px; font-weight: 500; color: #9aa; background: #2f2f37; border-radius: 4px; padding: 1px 5px; margin-left: 4px; }
+    .action-card .dur-tog { width: 100%; margin-top: 6px; padding: 4px; font-size: 11px; text-align: left; cursor: pointer; background: none; border: none; color: #9aa; }
+    .action-card .dur-tog:hover { color: #cde; }
+    .action-card .del-x { position: absolute; top: 5px; right: 7px; background: none; border: none; color: #888; font-size: 13px; line-height: 1; cursor: pointer; padding: 2px; }
+    .action-card .del-x:hover:not(:disabled) { color: #e88; }
+    .action-card .play-row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+    .action-card .play-row .pp { min-width: 32px; padding: 4px 8px; }
+    .action-card .frame-lbl { font-size: 11px; color: #bbb; min-width: 44px; text-align: right; }
+    /* modern media scrubber (distinct from the plain duration slider) */
+    .play-scrub { -webkit-appearance: none; appearance: none; flex: 1; height: 6px; border-radius: 3px; background: #34343c; outline: none; cursor: pointer; }
+    .play-scrub::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid #5ad1ff; box-shadow: 0 0 4px #0009; cursor: pointer; }
+    .play-scrub::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: #fff; border: 2px solid #5ad1ff; cursor: pointer; }
+    .action-card .prev-btn { width: 100%; padding: 6px; margin-bottom: 6px; font-size: 12px; cursor: pointer; border-radius: 6px; background: #34343a; color: #ddd; border: 1px solid #4a4a52; }
+    .action-card .prev-btn:hover:not(:disabled) { background: #3f3f48; }
+    .action-card .prev-btn:disabled { opacity: .5; cursor: default; }
+    .action-card .regen-row { display: flex; gap: 6px; }
+    .action-card .rg { flex: 1; padding: 6px; font-size: 11.5px; cursor: pointer; border-radius: 5px; background: #34343a; color: #ddd; border: 1px solid #444; }
+    .action-card .rg:hover:not(:disabled) { background: #3f3f48; }
+    .action-card .rg:disabled { opacity: .45; cursor: default; }
+    .action-card .pr { margin: 2px 0 7px; font-size: 11px; line-height: 1.4; }
+    .action-card .pr-txt { color: #888; }
+    .action-card .pr-edit-btn { background: none; border: none; color: #8ab; cursor: pointer; font-size: 12px; padding: 0 0 0 5px; vertical-align: baseline; }
+    .action-card .pr-edit-btn:hover:not(:disabled) { color: #cde; }
+    .action-card textarea.pr-edit { width: 100%; box-sizing: border-box; margin: 2px 0 6px; padding: 5px 6px; font: inherit; font-size: 12px; resize: vertical; background: #1c1c22; color: #e3e3e8; border: 1px solid #4a6; border-radius: 5px; }
+    .action-card .edit-bar { display: flex; gap: 6px; }
+    .dur { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
+    .dur input[type=range] { flex: 1; cursor: pointer; }
+    .dur-tag { font-size: 11px; color: #888; }
+    .dur-lbl { font-size: 11px; color: #bbb; min-width: 28px; text-align: right; }
+    .action-card .rot-row { display: flex; align-items: center; gap: 6px; }
+    .action-card .rot-row input[type=range] { flex: 1; cursor: pointer; }
+    .action-card .rot-save { padding: 3px 9px; font-size: 11px; border-radius: 5px; cursor: pointer; background: #2d4a35; color: #9fd; border: 1px solid #4a6; }
+    .action-card .rot-save:hover:not(:disabled) { background: #34563f; }
+    .action-card .rot-save:disabled { opacity: .4; cursor: default; }
     .action-card .row { display: flex; gap: 6px; }
     .action-card button { padding: 5px 8px; font-size: 12px; border-radius: 5px; cursor: pointer; background: #34343a; color: #ddd; border: 1px solid #444; }
     .action-card button.prev { flex: 1; }
@@ -74,6 +111,12 @@
     .action-card.playing button.prev { background: #2d4a35; border-color: #3a6; color: #7ec77e; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .spin { display: inline-block; animation: spin .9s linear infinite; }
+    .add-form { background: #222228; border: 1px solid #3a3a40; border-radius: 8px; padding: 9px; margin-bottom: 10px; }
+    .add-input { width: 100%; box-sizing: border-box; margin-bottom: 6px; padding: 5px 6px; font: inherit; font-size: 12px; resize: vertical; background: #1c1c22; color: #e3e3e8; border: 1px solid #3a3a40; border-radius: 5px; }
+    .add-row { display: flex; gap: 6px; margin-bottom: 6px; }
+    .add-action { flex: 1; padding: 7px; font-size: 11.5px; cursor: pointer; border-radius: 6px; background: #2d4a35; color: #9fd; border: 1px solid #4a6; }
+    .add-action:hover:not(:disabled) { background: #34563f; }
+    .add-action:disabled { opacity: .45; cursor: default; }
   </style>
 </head>
 <body>
@@ -81,6 +124,10 @@
   <div id="cam-controls">
     <button id="cam-follow" class="cam-btn" title="Lock camera to follow the character">🎥</button>
     <button id="cam-reset" class="cam-btn" title="Reset to the default view">⌖</button>
+  </div>
+  <div id="axis-gizmo">
+    <button id="axis-x" class="axis-btn ax-x" title="Align view down the X axis">X</button>
+    <button id="axis-z" class="axis-btn ax-z" title="Align view down the Z axis (front)">Z</button>
   </div>
   <button id="drawer-toggle" title="Open the actions library">ACTIONS</button>
   <div id="actions-drawer">

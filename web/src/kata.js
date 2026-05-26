@@ -19,17 +19,27 @@ let mode = 'path' // 'path' (play whole path to node) | 'move' (just that move);
 let scrubbing = false, curFps = 30, curFrames = 0
 
 // --- Scene ----------------------------------------------------------------
+const app = document.getElementById('app')   // viewer area (right of the panel); the character centers here
 const renderer = new THREE.WebGLRenderer({ antialias: true })
 renderer.setPixelRatio(window.devicePixelRatio)
-renderer.setSize(window.innerWidth, window.innerHeight)
 renderer.outputColorSpace = THREE.SRGBColorSpace
-document.getElementById('app').appendChild(renderer.domElement)
+app.appendChild(renderer.domElement)
 const scene = new THREE.Scene()
 scene.background = new THREE.Color(0x1a1a1a)
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100)
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100)
 camera.position.set(0, 1.5, 3.4)
 const controls = new OrbitControls(camera, renderer.domElement)
 controls.target.set(0, 1.0, 0); controls.update()
+
+// Size the canvas to the VIEWER element (not the window), so the character sits
+// centred in the visible area instead of behind the left panel.
+function resizeViewer() {
+  const w = app.clientWidth || 1, h = app.clientHeight || 1
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix()
+}
+window.addEventListener('resize', resizeViewer)
+new ResizeObserver(resizeViewer).observe(app)
+resizeViewer()
 
 // Camera controls: follow-the-character lock + reset to the default view.
 const HOME_POS = new THREE.Vector3(0, 1.5, 3.4)
@@ -39,25 +49,38 @@ const _camTmp = new THREE.Vector3()
 const followBtn = document.getElementById('cam-follow')
 const resetBtn = document.getElementById('cam-reset')
 followBtn.onclick = () => { camFollow = !camFollow; followBtn.classList.toggle('on', camFollow); camPrev = null }
-resetBtn.onclick = () => { camera.position.copy(HOME_POS); controls.target.copy(HOME_TGT); controls.update(); camPrev = null }
+resetBtn.onclick = () => { camera.position.copy(HOME_POS); controls.target.copy(HOME_TGT); camera.up.set(0, 1, 0); controls.update(); camPrev = null }
+
+// Axis gizmo: snap the camera to look down X / Y / Z (toggles +/- on repeat press).
+const axisSign = { x: -1, z: -1 }
+function alignAxis(a) {
+  const dist = camera.position.distanceTo(controls.target) || 3.4
+  const s = (axisSign[a] *= -1)
+  camera.position.copy(controls.target).add(new THREE.Vector3(a === 'x' ? s : 0, 0, a === 'z' ? s : 0).multiplyScalar(dist))
+  camera.up.set(0, 1, 0)
+  controls.update()
+}
+for (const a of ['x', 'z']) document.getElementById('axis-' + a).onclick = () => alignAxis(a)
+
 scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1.2))
 const dir = new THREE.DirectionalLight(0xffffff, 1.5); dir.position.set(3, 5, 2); scene.add(dir)
 const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 1 }))
 floor.rotation.x = -Math.PI / 2; scene.add(floor)
 scene.add(new THREE.GridHelper(40, 80, 0x333333, 0x303030))
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix()
-  renderer.setSize(window.innerWidth, window.innerHeight)
-})
+// Floor direction arrows at the origin so facing is readable. The character is
+// re-rooted facing +Z, so the blue +Z arrow points "forward".
+for (const [dirv, color] of [[[1, 0, 0], 0xe05555], [[0, 0, 1], 0x5a9bff]]) {
+  scene.add(new THREE.ArrowHelper(new THREE.Vector3(...dirv), new THREE.Vector3(0, 0.02, 0), 1.4, color, 0.28, 0.16))
+}
 
 // --- Character + animator (smplx neutral) ---------------------------------
-let animator = null
+let animator = null, charRoot = null   // charRoot is yawed live for the rotation control
 const gltfLoader = new GLTFLoader()
 async function loadCharacter(cfg) {
   const gltf = await gltfLoader.loadAsync(cfg.url)
   const root = gltf.scene
   root.scale.setScalar(cfg.scale ?? 1.0)
-  scene.add(root)
+  scene.add(root); charRoot = root
   let skinned = null
   root.traverse(o => { if (o.isSkinnedMesh) { if (!skinned) skinned = o; o.frustumCulled = false } })
   root.updateMatrixWorld(true)
@@ -323,7 +346,8 @@ function onNodeClick(id) {
 
 async function select(id) {
   selectedId = id
-  if (previewingPrompt) { previewingPrompt = null; if (drawerOpen()) renderDrawer() }   // a kata move now plays, not a library action
+  if (previewingPrompt) { previewingPrompt = null; previewClipId = null; if (drawerOpen()) renderDrawer() }   // a kata move now plays, not a library action
+  if (charRoot) charRoot.rotation.y = 0
   activeId = null; playSegs = null
   pathSet = new Set(mode === 'path' ? pathToRoot(id) : [])
   refreshNodeStyles()
@@ -427,8 +451,9 @@ scrub.onchange = () => { scrubbing = false; updatePlayBtn() }
 
 // --- Actions library drawer -----------------------------------------------
 // Reusable standalone moves (continues_from = none) matched to store clips by
-// prompt. Preview plays one in the viewer; regenerate makes a fresh take.
-const ACTIONS = [
+// prompt. Preview plays one in the viewer; regenerate makes a fresh take. The
+// list is user-editable (add / edit prompt) and persisted in localStorage.
+const DEFAULT_ACTIONS = [
   { name: 'Down block', prompt: 'a martial artist performs a low down block in a front stance' },
   { name: 'Rising block', prompt: 'a martial artist performs a rising block in a front stance' },
   { name: 'Knife-hand block', prompt: 'a martial artist performs a knife-hand block in a back stance' },
@@ -440,60 +465,253 @@ const ACTIONS = [
   { name: 'Roundhouse', prompt: 'a martial artist throws a roundhouse kick' },
   { name: 'Turn / stance', prompt: 'a martial artist turns ninety degrees into a front stance' },
 ]
+const ACTIONS_KEY = 'kata-actions-v1'
+function loadActions() {
+  try { const a = JSON.parse(localStorage.getItem(ACTIONS_KEY)); if (Array.isArray(a) && a.length) return a } catch {}
+  return DEFAULT_ACTIONS.map((x, i) => ({ id: 'a' + i, seconds: 2.2, ...x }))
+}
+const saveActions = () => localStorage.setItem(ACTIONS_KEY, JSON.stringify(actions))
+let actions = loadActions()
+function deriveName(p) {   // a short title from the prompt (no separate name field)
+  const s = p.replace(/^(a martial artist|a person|the practitioner|the martial artist)\s+/i, '').trim()
+  const w = s.split(/\s+/).slice(0, 4).join(' ')
+  return (w.charAt(0).toUpperCase() + w.slice(1)).slice(0, 28) || 'New move'
+}
+let adding = false, addSeconds = 2.2   // new-action gen flag + the add form's chosen duration
+async function addAction(promptText, seconds, fromFrame) {
+  const p = (promptText || '').trim(); if (!p) return
+  const act = { id: 'a' + Date.now().toString(36), name: deriveName(p), prompt: p, seconds: seconds ?? 2.2 }
+  actions.unshift(act); saveActions()   // newest first, just under the add form
+  adding = true; renderDrawer()                 // card + add-button feedback appear at once
+  // generate from scratch, or — if asked and something is previewed — from that paused frame
+  try { await (fromFrame && previewClipId ? regenFromFrame(act) : regenAction(act)) }
+  finally { adding = false; renderDrawer() }
+}
+function deleteAction(act) {
+  actions = actions.filter(a => a.id !== act.id); saveActions()
+  if (editingId === act.id) editingId = null
+  if (previewingPrompt === act.prompt) { previewingPrompt = null; previewClipId = null }
+  renderDrawer(); setStatus(`removed “${act.name}”`)
+}
+let editingId = null   // action whose prompt is being edited inline
+let durOpen = new Set()   // action ids whose (collapsed) duration section is expanded
+const startEdit = (act) => { editingId = act.id; renderDrawer() }
+const cancelEdit = () => { editingId = null; renderDrawer() }
+function commitEdit(act, value) {
+  const v = (value || '').trim(); editingId = null
+  if (v && v !== act.prompt) { act.prompt = v; saveActions(); setStatus(`updated “${act.name}” — press ↻ to regenerate it`) }
+  renderDrawer()   // a changed prompt no longer matches the old clip → shows "not generated"
+}
 let actionClips = {}             // prompt -> latest standalone clip metadata
+let clipById = {}                // id -> clip metadata (incl. continuations)
 let previewingPrompt = null      // action currently shown in the viewer
 let busyPrompt = null            // action currently regenerating
+let aScrub = null, aLabel = null, aPlayBtn = null   // the previewing card's playback controls (synced in tick)
+let previewClipId = null   // clip currently in the viewer — the source for "from preview frame"
+// Fill the played portion of a scrubber (modern media-bar look).
+function scrubFill(el) {
+  const max = Number(el.max) || 1, pct = (Number(el.value) / max) * 100
+  el.style.background = `linear-gradient(90deg, #5ad1ff ${pct}%, #34343c ${pct}%)`
+}
 async function loadActionClips() {
-  actionClips = {}
+  actionClips = {}; clipById = {}
   for (const a of await listAnimations()) {                 // sorted newest-first by the store
-    if (a.continues_from?.source_id) continue               // standalone moves only
+    clipById[a.id] = a
+    if (a.continues_from?.source_id) continue               // standalone moves match by prompt
     if (!actionClips[a.prompt]) actionClips[a.prompt] = a   // keep the most recent per prompt
   }
 }
+// An action's clip: an explicit clipId (e.g. a regenerate-from-frame result) wins,
+// else the newest standalone clip matching its prompt.
+const clipForAction = (act) => (act.clipId && clipById[act.clipId]) || actionClips[act.prompt]
 function drawerOpen() { return drawer.classList.contains('open') }
 async function previewAction(act) {
-  const clip = actionClips[act.prompt]; if (!clip) return
-  previewingPrompt = act.prompt; renderDrawer()             // highlight the card right away
+  const clip = clipForAction(act); if (!clip) return
+  previewingPrompt = act.prompt; previewClipId = clip.id; renderDrawer()   // highlight + show playback controls right away
   const m = await fetchAnimation(clip.id)
+  if (charRoot) charRoot.rotation.y = 0                                     // each preview starts unrotated
   animator?.setMotion(m, { loop: true })
   selectedId = null; activeId = null; pathSet = new Set(); refreshNodeStyles()
-  playSegs = [{ id: clip.id, start: 0, end: m.num_frames, lo: 0, hi: m.num_frames }]   // scrubber works; no tree node to highlight
-  setScrubRange(m)
+  playSegs = [{ id: clip.id, start: 0, end: m.num_frames, lo: 0, hi: m.num_frames }]   // drives the scrubber; no tree node to highlight
+  setScrubRange(m); renderDrawer()                          // re-render so the card scrubber gets the right range
   setStatus(`previewing action: ${act.name}`)
 }
 async function regenAction(act) {
-  busyPrompt = act.prompt; renderDrawer()                   // show the regenerating state on the card
-  setStatus(`regenerating “${act.name}”…`)
+  busyPrompt = act.prompt; renderDrawer()                   // show the generating state on the card
+  setStatus(`generating “${act.name}”…`)
   try {
-    const r = await fetch(`${KIMODO_URL}/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: act.prompt, seconds: 2.2 }) })
+    const r = await fetch(`${KIMODO_URL}/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: act.prompt, seconds: act.seconds ?? 2.2 }) })
     if (!r.ok) throw new Error(`generate ${r.status}`)
+    act.clipId = (await r.json()).id; saveActions()         // pin this action to the new clip
     await loadActionClips()
     busyPrompt = null
     await previewAction(act)                                // renders + auto-previews the fresh take
-    setStatus(`✓ regenerated “${act.name}”`)
-  } catch (e) { busyPrompt = null; renderDrawer(); setStatus('regen failed: ' + e.message) }
+    setStatus(`✓ generated “${act.name}”`)
+  } catch (e) { busyPrompt = null; renderDrawer(); setStatus('generation failed: ' + e.message) }
+}
+// Generate this action so it STARTS from the frame currently paused in the
+// preview — the source is whatever clip is being previewed (may be a DIFFERENT
+// action), so you can chain one move's pose into another via /generate_continue.
+async function regenFromFrame(act) {
+  if (!previewClipId || !animator) return
+  const frame = Math.round(animator.frame || 0)
+  busyPrompt = act.prompt; renderDrawer()
+  setStatus(`generating “${act.name}” from the previewed frame ${frame}…`)
+  try {
+    const r = await fetch(`${KIMODO_URL}/generate_continue`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_id: previewClipId, source_frame: frame, prompt: act.prompt, seconds: act.seconds ?? 2.2, stitch: false }),
+    })
+    if (!r.ok) throw new Error(`generate_continue ${r.status}`)
+    act.clipId = (await r.json()).id; saveActions()
+    await loadActionClips()
+    busyPrompt = null
+    await previewAction(act)
+    setStatus(`✓ generated “${act.name}” from the previewed frame ${frame}`)
+  } catch (e) { busyPrompt = null; renderDrawer(); setStatus('generation failed: ' + e.message) }
+}
+// Bake a yaw into the action's clip data (so facing is part of the animation) and
+// re-point the action to the new clip. Resets the live rotation afterward.
+async function saveRotation(act, deg) {
+  const clip = clipForAction(act); if (!clip || !deg) return
+  busyPrompt = act.prompt; renderDrawer()
+  setStatus(`rotating “${act.name}” ${deg}°…`)
+  try {
+    const r = await fetch(`${KIMODO_URL}/rotate_clip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: clip.id, degrees: deg }) })
+    if (!r.ok) throw new Error(`rotate_clip ${r.status}`)
+    act.clipId = (await r.json()).id; saveActions()
+    if (charRoot) charRoot.rotation.y = 0
+    await loadActionClips(); busyPrompt = null
+    await previewAction(act)
+    setStatus(`✓ baked ${deg}° into “${act.name}”`)
+  } catch (e) { busyPrompt = null; renderDrawer(); setStatus('rotate failed: ' + e.message) }
 }
 function renderDrawer() {
   const box = document.getElementById('actions-list'); if (!box) return
   box.innerHTML = ''
-  for (const act of ACTIONS) {
-    const has = !!actionClips[act.prompt]
+  // Add form: one prompt field + button → creates AND generates in one press.
+  const form = document.createElement('div'); form.className = 'add-form'
+  const addTa = document.createElement('textarea'); addTa.className = 'add-input'; addTa.rows = 2
+  addTa.placeholder = 'describe a new move, e.g. “a martial artist throws an elbow strike”'
+  addTa.disabled = adding
+  const submitAdd = () => { const v = addTa.value.trim(); if (v && !adding) addAction(v, addSeconds) }
+  const submitAddFrame = () => { const v = addTa.value.trim(); if (v && !adding && previewClipId) addAction(v, addSeconds, true) }
+  addTa.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitAdd() } }
+  // buttons row: add (from scratch) + add-from-previewed-frame
+  const arow = document.createElement('div'); arow.className = 'add-row'
+  const add = document.createElement('button'); add.className = 'add-action'; add.disabled = adding
+  add.innerHTML = adding ? '<span class="spin">⟳</span> generating…' : '+ Add &amp; generate'
+  add.onclick = submitAdd
+  const addf = document.createElement('button'); addf.className = 'add-action'; addf.disabled = adding || !previewClipId
+  addf.textContent = '↳ from preview frame'
+  addf.title = previewClipId ? 'add a move that starts from the frame currently paused in the preview' : 'preview an action and pause on a frame first'
+  addf.onclick = submitAddFrame
+  arow.appendChild(add); arow.appendChild(addf)
+  // duration, below the buttons
+  const adur = document.createElement('div'); adur.className = 'dur'
+  const atag = document.createElement('span'); atag.className = 'dur-tag'; atag.textContent = '⏱'
+  const arange = document.createElement('input'); arange.type = 'range'; arange.min = '0.5'; arange.max = '5'; arange.step = '0.1'
+  arange.value = String(addSeconds); arange.disabled = adding
+  const albl = document.createElement('span'); albl.className = 'dur-lbl'; albl.textContent = `${addSeconds.toFixed(1)}s`
+  arange.oninput = () => { addSeconds = Number(arange.value); albl.textContent = `${addSeconds.toFixed(1)}s` }
+  adur.appendChild(atag); adur.appendChild(arange); adur.appendChild(albl)
+  form.appendChild(addTa); form.appendChild(arow); form.appendChild(adur); box.appendChild(form)
+  aScrub = aLabel = aPlayBtn = null   // refreshed below if a previewing card renders
+  let editTa = null
+  for (const act of actions) {
+    const has = !!clipForAction(act)
     const busy = busyPrompt === act.prompt
-    const playing = previewingPrompt === act.prompt && !busy
+    const editing = editingId === act.id
+    const playing = previewingPrompt === act.prompt && !busy && !editing
+    const secs = act.seconds ?? 2.2
     const card = document.createElement('div'); card.className = 'action-card' + (playing ? ' playing' : '')
-    const badge = playing ? ' <span class="badge">● previewing</span>'
-      : busy ? ' <span class="badge gen"><span class="spin">⟳</span> regenerating…</span>' : ''
-    card.innerHTML = `<div class="nm">${act.name}${badge}</div><div class="pr">${act.prompt}</div>`
-    const row = document.createElement('div'); row.className = 'row'
-    const prev = document.createElement('button'); prev.className = 'prev'
-    prev.disabled = !has || busy
-    prev.textContent = busy ? 'regenerating…' : !has ? 'not generated' : playing ? '❚❚ previewing' : '▶ preview'
-    prev.onclick = () => previewAction(act)
-    const reg = document.createElement('button'); reg.title = 'regenerate'; reg.disabled = busy
-    reg.innerHTML = busy ? '<span class="spin">⟳</span>' : '↻'
-    reg.onclick = () => regenAction(act)
-    row.appendChild(prev); row.appendChild(reg); card.appendChild(row); box.appendChild(card)
+    const nm = document.createElement('div'); nm.className = 'nm'
+    nm.innerHTML = `${act.name} <span class="dur-badge">${secs.toFixed(1)}s</span>`
+      + (playing ? ' <span class="badge">● previewing</span>'
+      : busy ? ' <span class="badge gen"><span class="spin">⟳</span> generating…</span>' : '')
+    card.appendChild(nm)
+    const durBadge = nm.querySelector('.dur-badge')
+
+    if (editing) {
+      const ta = document.createElement('textarea'); ta.className = 'pr-edit'; ta.rows = 3; ta.value = act.prompt
+      ta.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitEdit(act, ta.value) } else if (e.key === 'Escape') cancelEdit() }
+      const bar = document.createElement('div'); bar.className = 'edit-bar'
+      const save = document.createElement('button'); save.textContent = '✓ save'; save.onclick = () => commitEdit(act, ta.value)
+      const cancel = document.createElement('button'); cancel.textContent = 'cancel'; cancel.onclick = cancelEdit
+      bar.appendChild(save); bar.appendChild(cancel)
+      card.appendChild(ta); card.appendChild(bar); editTa = ta
+    } else {
+      // delete X — top-right corner of the card
+      const x = document.createElement('button'); x.className = 'del-x'; x.textContent = '✕'; x.title = 'delete action'; x.disabled = busy
+      x.onclick = () => deleteAction(act); card.appendChild(x)
+
+      const pr = document.createElement('div'); pr.className = 'pr'
+      const txt = document.createElement('span'); txt.className = 'pr-txt'; txt.textContent = act.prompt
+      const ed = document.createElement('button'); ed.className = 'pr-edit-btn'; ed.textContent = '✎'; ed.title = 'edit prompt'; ed.disabled = busy
+      ed.onclick = () => startEdit(act)
+      pr.appendChild(txt); pr.appendChild(ed); card.appendChild(pr)
+
+      // preview, or — while previewing this card — a media transport
+      if (playing) {
+        const max = Math.max(0, (curFrames || 1) - 1)
+        const pp = document.createElement('button'); pp.className = 'pp'; pp.textContent = animator?.playing ? '❚❚' : '▶'
+        pp.onclick = () => { setPlaying(!(animator && animator.playing)); pp.textContent = animator?.playing ? '❚❚' : '▶' }
+        const lbl = document.createElement('span'); lbl.className = 'frame-lbl'; lbl.textContent = `${Math.round(animator?.frame || 0)}/${max}`
+        const sc = document.createElement('input'); sc.type = 'range'; sc.className = 'play-scrub'; sc.min = 0; sc.max = max; sc.step = 1; sc.value = Math.round(animator?.frame || 0)
+        sc.oninput = () => { scrubbing = true; const f = Number(sc.value); seekTo(f); pp.textContent = '▶'; lbl.textContent = `${f}/${max}`; scrubFill(sc) }
+        sc.onchange = () => { scrubbing = false; pp.textContent = animator?.playing ? '❚❚' : '▶' }
+        scrubFill(sc)
+        const prow = document.createElement('div'); prow.className = 'play-row'
+        prow.appendChild(pp); prow.appendChild(sc); prow.appendChild(lbl); card.appendChild(prow)
+        aPlayBtn = pp; aScrub = sc; aLabel = lbl   // tick keeps these in sync with playback
+      } else {
+        const prev = document.createElement('button'); prev.className = 'prev-btn'; prev.disabled = !has || busy
+        prev.textContent = busy ? 'generating…' : !has ? 'not generated' : '▶ preview'
+        prev.onclick = () => previewAction(act); card.appendChild(prev)
+      }
+
+      // collapsible "options": the two regenerate buttons + duration
+      const open = durOpen.has(act.id)
+      const tog = document.createElement('button'); tog.className = 'dur-tog'
+      tog.textContent = `${open ? '▾' : '▸'} options · ${secs.toFixed(1)}s`
+      tog.onclick = () => { durOpen.has(act.id) ? durOpen.delete(act.id) : durOpen.add(act.id); renderDrawer() }
+      card.appendChild(tog)
+      if (open) {
+        const rrow = document.createElement('div'); rrow.className = 'regen-row'
+        const reg = document.createElement('button'); reg.className = 'rg'; reg.disabled = busy
+        reg.innerHTML = busy ? '<span class="spin">⟳</span>' : '↻ regenerate'; reg.title = 'regenerate from scratch (rest pose)'
+        reg.onclick = () => regenAction(act)
+        const regf = document.createElement('button'); regf.className = 'rg'; regf.disabled = busy || !previewClipId
+        regf.textContent = '↳ from preview frame'
+        regf.title = previewClipId ? 'start this move from the frame currently paused in the preview (any action)' : 'preview an action and pause on a frame first'
+        regf.onclick = () => regenFromFrame(act)
+        rrow.appendChild(reg); rrow.appendChild(regf); card.appendChild(rrow)
+
+        const dur = document.createElement('div'); dur.className = 'dur'
+        const dtag = document.createElement('span'); dtag.className = 'dur-tag'; dtag.textContent = '⏱'
+        const drange = document.createElement('input'); drange.type = 'range'; drange.min = '0.5'; drange.max = '5'; drange.step = '0.1'; drange.value = String(secs); drange.disabled = busy
+        const dlbl = document.createElement('span'); dlbl.className = 'dur-lbl'; dlbl.textContent = `${secs.toFixed(1)}s`
+        drange.oninput = () => { act.seconds = Number(drange.value); const t = `${act.seconds.toFixed(1)}s`; dlbl.textContent = t; if (durBadge) durBadge.textContent = t; tog.textContent = `▾ options · ${t}`; saveActions() }
+        dur.appendChild(dtag); dur.appendChild(drange); dur.appendChild(dlbl); card.appendChild(dur)
+
+        // rotation: yaw the character live (only while previewing this action), then
+        // Save bakes it into the clip data. Save is enabled only once it's changed.
+        const curDeg = (playing && charRoot) ? Math.round(charRoot.rotation.y * 180 / Math.PI) : 0
+        const rotRow = document.createElement('div'); rotRow.className = 'rot-row'
+        const rtag = document.createElement('span'); rtag.className = 'dur-tag'; rtag.textContent = '⟲'
+        const rrange = document.createElement('input'); rrange.type = 'range'; rrange.min = '-180'; rrange.max = '180'; rrange.step = '1'; rrange.value = String(curDeg)
+        rrange.disabled = !playing || busy
+        rrange.title = playing ? 'rotate the character to face a direction' : 'preview this action to rotate it'
+        const rlbl = document.createElement('span'); rlbl.className = 'dur-lbl'; rlbl.textContent = `${curDeg}°`
+        const rsave = document.createElement('button'); rsave.className = 'rot-save'; rsave.textContent = 'save'; rsave.disabled = curDeg === 0 || busy
+        rrange.oninput = () => { const d = Number(rrange.value); rlbl.textContent = `${d}°`; if (charRoot) charRoot.rotation.y = d * Math.PI / 180; rsave.disabled = d === 0 || busy }
+        rsave.onclick = () => saveRotation(act, Number(rrange.value))
+        rotRow.appendChild(rtag); rotRow.appendChild(rrange); rotRow.appendChild(rlbl); rotRow.appendChild(rsave); card.appendChild(rotRow)
+      }
+    }
+    box.appendChild(card)
   }
+  if (editTa) { editTa.focus(); editTa.select() }
 }
 const drawer = document.getElementById('actions-drawer')
 const drawerToggle = document.getElementById('drawer-toggle')
@@ -501,6 +719,7 @@ function openDrawer(on) {
   drawer.classList.toggle('open', on)
   drawerToggle.style.display = on ? 'none' : 'block'
   if (on) loadActionClips().then(renderDrawer)
+  else { aScrub = aLabel = aPlayBtn = null }   // drop refs to removed card controls
 }
 drawerToggle.onclick = () => openDrawer(true)
 document.getElementById('drawer-close').onclick = () => openDrawer(false)
@@ -511,22 +730,28 @@ function tick() {
   // The move whose segment is playing: highlight + pulse it, and run a playhead
   // down its timeline bar tracking the exact frame on screen.
   let shown = false
-  if (playSegs && animator && typeof animator.frame === 'number' && POS) {
+  if (playSegs && animator && typeof animator.frame === 'number') {
     const f = animator.frame
     const seg = playSegs.find(s => f >= s.start && f < s.end) || playSegs[playSegs.length - 1]
-    const p = seg && POS.get(seg.id)
-    if (p) {
-      if (seg.id !== activeId) { activeId = seg.id; refreshNodeStyles() }
-      const own = seg.lo + (f - seg.start)                    // frame within this move
-      const yHead = p.y + own * SCALE_Y
-      playLine.attr('x1', p.x).attr('y1', p.y).attr('x2', p.x).attr('y2', yHead).style('display', null)
-      playHead.attr('cx', p.x).attr('cy', yHead).style('display', null)
-      // pulse only while actually playing; hold steady (enlarged) while scrubbing
-      const r = animator.playing ? 9 + 3 * (0.5 + 0.5 * Math.sin(performance.now() / 110)) : 9
-      gNode.selectAll('g.n circle').filter(d => d.id === activeId).attr('r', r)
-      // keep the scrubber + label in sync with playback (unless the user is dragging)
-      if (!scrubbing && animator.playing && curFrames) { scrub.value = f; frameLabel.textContent = `${f}/${curFrames - 1}` }
-      shown = true
+    if (seg) {
+      const p = POS && POS.get(seg.id)
+      if (p) {   // a kata tree node — pulse it + run the playhead down its bar
+        if (seg.id !== activeId) { activeId = seg.id; refreshNodeStyles() }
+        const own = seg.lo + (f - seg.start)
+        const yHead = p.y + own * SCALE_Y
+        playLine.attr('x1', p.x).attr('y1', p.y).attr('x2', p.x).attr('y2', yHead).style('display', null)
+        playHead.attr('cx', p.x).attr('cy', yHead).style('display', null)
+        const r = animator.playing ? 9 + 3 * (0.5 + 0.5 * Math.sin(performance.now() / 110)) : 9   // pulse while playing
+        gNode.selectAll('g.n circle').filter(d => d.id === activeId).attr('r', r)
+        shown = true
+      }
+      // keep the scrubbers (main panel + action card) in sync with playback
+      if (!scrubbing && animator.playing && curFrames) {
+        scrub.value = f; frameLabel.textContent = `${f}/${curFrames - 1}`
+        if (aScrub) { aScrub.value = f; scrubFill(aScrub) }
+        if (aLabel) aLabel.textContent = `${f}/${curFrames - 1}`
+      }
+      if (aPlayBtn) aPlayBtn.textContent = animator.playing ? '❚❚' : '▶'
     }
   }
   if (!shown && playHead) { playLine.style('display', 'none'); playHead.style('display', 'none') }

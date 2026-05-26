@@ -1,6 +1,6 @@
 ---
 name: kimodo-motion
-description: Generate humanoid animations from text with Kimodo (NVIDIA's SMPL-X text-to-motion diffusion model) and get them into a project. Use when the user wants to run the Kimodo server, generate/author a motion from a text prompt, browse or preview generated clips, export them (GLB/NPZ/BVH), or bake them into s&box. Triggers include "kimodo", "text to motion", "generate an animation", "make a walk/wave/sit animation", "SMPL-X", "motion diffusion", "bake/import this animation", "kimodo server".
+description: Generate humanoid animations from text with Kimodo (NVIDIA's SMPL-X text-to-motion diffusion model) and get them into a project. Use when the user wants to run the Kimodo server, generate/author a motion from a text prompt, chain moves into a combo/kata (start a move from a frame of another clip), browse or preview generated clips, export them (GLB/NPZ/BVH), or bake them into s&box. Triggers include "kimodo", "text to motion", "generate an animation", "make a walk/wave/sit animation", "kata", "combo", "continue/branch from a frame", "SMPL-X", "motion diffusion", "bake/import this animation", "kimodo server".
 allowed-tools: Bash(.claude/skills/kimodo-motion/tools/*:*)
 metadata:
   tags: kimodo, text-to-motion, smplx, animation, motion-diffusion, gamedev, sbox, docker, nvidia
@@ -57,6 +57,11 @@ Read the matching rule before going deep:
 - **`rules/generating.md`** — the `/generate` contract (`prompt`, `seconds`,
   `seam_pose` for clean loops), prompt-writing tips, the CLI (`kimodo_gen`) and
   gradio demo (:7860), listing/fetching. **Read when authoring clips.**
+- **`rules/continuations.md`** — chaining moves into combos/katas: starting a move
+  from a frame of another clip (`/generate_continue`), ending mid-action
+  (`end_on_peak`), whole-kata `/generate_sequence`, `/stitch_path`, and the
+  **`first_heading_angle` gotcha** (seeding a heading drives in-place moves
+  backward). **Read before building a kata or branching from a frame.**
 - **`rules/exporting.md`** — the format map: API JSON (viewer + baker), NPZ/BVH/
   AMASS/G1-CSV (research/robotics, via the CLI + `kimodo_convert`), SMPL-X mesh
   GLB. Which format for which target. **Read before exporting anywhere but s&box.**

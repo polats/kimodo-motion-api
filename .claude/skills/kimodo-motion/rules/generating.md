@@ -46,6 +46,13 @@ plus `/mixamo/*` (Mixamo search/import; needs `MIXAMO_TOKEN` in `.env`).
 - For locomotion, expect some drift/acceleration in long single clips — generate
   short and loop with `seam_pose`, or bake and handle root motion in-engine.
 
+## Chaining moves (combos / katas)
+
+To make a move **start from a frame of another clip** — for a combo, a kata, or
+branching variations off a shared opening — use `/generate_continue`,
+`/generate_sequence`, and `/stitch_path`. See **`rules/continuations.md`**
+(including the `first_heading_angle` gotcha that drives in-place moves backward).
+
 ## Other ways to generate
 
 - **CLI `kimodo_gen`** (pip path / `docker exec`) — generates and writes motion
