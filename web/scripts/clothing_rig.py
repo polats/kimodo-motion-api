@@ -24,11 +24,12 @@ Steps:
 Usage:
   blender -b -P clothing_rig.py -- <body_unirig.glb> <citizen_human_male_REF.fbx> <garment.glb> <out.glb>
 """
-import bpy, sys
+import bpy, sys, os
 from mathutils import Vector, Matrix
 
 argv = sys.argv[sys.argv.index("--") + 1:]
 BODY_U, REF_FBX, GARMENT, OUT = argv[:4]
+TEXTURE = argv[4] if len(argv) > 4 and argv[4] else None   # optional baked-in albedo PNG
 
 # arm-chain virtual-T logic — verbatim from tpose_citizen_mesh.py
 SMPLX_REST_WORLD = {
@@ -159,6 +160,16 @@ bpy.context.view_layer.objects.active = armU
 bpy.ops.object.parent_set(type="ARMATURE")
 
 bpy.data.objects.remove(bodyMeshU, do_unlink=True)
+
+# bake the garment's albedo into a material so the exported GLB carries its texture
+if TEXTURE and os.path.exists(TEXTURE):
+    mat = bpy.data.materials.new("garment"); mat.use_nodes = True
+    nt = mat.node_tree; bsdf = nt.nodes["Principled BSDF"]
+    tex = nt.nodes.new("ShaderNodeTexImage"); tex.image = bpy.data.images.load(TEXTURE)
+    nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    gMesh.data.materials.clear(); gMesh.data.materials.append(mat)
+    print("[rig] applied texture", os.path.basename(TEXTURE))
+
 print("[rig] export objs:", [o.name for o in bpy.context.scene.objects if o.type in ("MESH", "ARMATURE")])
 bpy.ops.export_scene.gltf(filepath=OUT, export_format="GLB",
                           export_skins=True, export_animations=False, export_morph=False)

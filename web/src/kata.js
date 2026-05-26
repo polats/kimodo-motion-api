@@ -106,7 +106,7 @@ function unifySkeletons(root) {
 }
 async function loadCharacter(cfg) {
   if (charRoot) {   // swap: drop the previous mesh first
-    detachClothing()   // its bones are about to be disposed
+    detachAllClothing()   // its bones are about to be disposed
     scene.remove(charRoot)
     charRoot.traverse(o => { o.geometry?.dispose?.(); if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose?.()) })
     charRoot = null; animator = null; charSkinned = null
@@ -164,49 +164,53 @@ function syncTwistBones() {
   }
 }
 
-// --- Clothing -------------------------------------------------------------
-// A garment GLB is skinned to the citizen's bone_N skeleton (decompiled from
-// s&box .vmdl_c, re-rigged via the REF rig — see web/scripts/clothing_rig.py).
-// It has its own copy of that skeleton; each frame we copy the citizen's driven
-// bone transforms onto the garment's matching bones (by name), so it deforms
-// with the body. Each garment is rigged to a specific body (matching bone_N).
-// Per garment: one rigged GLB per citizen body (each skinned to that body's
-// bone_N). The garment is body-agnostic in the UI ("worn"); we resolve the GLB
-// for whichever citizen is currently loaded — so it applies to all three, and
-// follows the body when you swap models.
-const CLOTHING = [
-  { id: 'jacket', label: 'Windbreaker (jacket)', color: 0x7a8a3a, glb: {
-    unirig_citizen: '/clothing/jacket_sausage.glb',
-    unirig_citizen_male: '/clothing/jacket_male.glb',
-    unirig_citizen_female: '/clothing/jacket_female.glb',
-  } },
-]
-const clothingUrlFor = (item, charId) => item.glb?.[charId] || null
-let clothingScene = null, clothingPairs = null, clothingWornId = null
-function detachClothing() {
-  if (clothingScene && charRoot) charRoot.remove(clothingScene)
-  if (clothingScene) clothingScene.traverse(o => { if (o.isMesh) { o.geometry?.dispose?.(); } })
-  clothingScene = null; clothingPairs = null   // keep clothingWornId so it re-attaches after a model swap
+// --- Clothing (manifest-driven, multi-slot layering) ----------------------
+// Garments come from GET /clothing (written by web/scripts/clothing_add.py): each
+// has a slot + a per-body GLB url, decompiled from s&box .vmdl_c and re-rigged onto
+// that body's bone_N (see clothing_rig.py). We wear one garment per slot; each is a
+// SkinnedMesh sharing the citizen's skeleton, driven every frame by syncClothing()
+// (copy the citizen's bone transforms onto the garment's same-named bones). The worn
+// set is body-agnostic — on a model swap we re-resolve each garment's GLB for the
+// new body, so an outfit follows you across sausage/male/female.
+let CLOTHING = []                                   // manifest from /clothing
+const SLOT_ORDER = ['head', 'face', 'torso_under', 'torso_over', 'hands', 'legs', 'feet']
+const SLOT_LABEL = { head: 'Hat', face: 'Glasses', torso_under: 'Shirt', torso_over: 'Jacket', hands: 'Gloves', legs: 'Trousers', feet: 'Shoes' }
+const worn = new Map()        // slot -> garment id (persists across model swaps)
+const attached = new Map()    // slot -> { scene, pairs } for the CURRENT body
+const clothingUrlFor = (item, charId) => item?.glb?.[charId] || null
+const garmentById = (id) => CLOTHING.find(c => c.id === id)
+async function loadClothingManifest() {
+  if (CLOTHING.length) return
+  try { CLOTHING = ((await (await fetch(`${KIMODO_URL}/clothing`)).json()).clothing) || [] }
+  catch (e) { console.warn('clothing manifest fetch failed', e) }
 }
-// Attach the worn garment's variant for the CURRENT body (no model swap).
-async function applyClothingForCurrentBody() {
-  detachClothing()
-  if (!clothingWornId || !charSkinned) return
-  const item = CLOTHING.find(c => c.id === clothingWornId); if (!item) return
-  const url = clothingUrlFor(item, currentCharId)
-  if (!url) return   // this garment isn't rigged for the current body (e.g. SMPL-X)
+function detachSlot(slot) {
+  const a = attached.get(slot); if (!a) return
+  if (charRoot) charRoot.remove(a.scene)
+  a.scene.traverse(o => { if (o.isMesh) o.geometry?.dispose?.() })
+  attached.delete(slot)
+}
+function detachAllClothing() { for (const s of [...attached.keys()]) detachSlot(s) }
+async function attachGarment(slot, item) {
+  detachSlot(slot)
+  if (!charSkinned) return
+  const url = clothingUrlFor(item, currentCharId); if (!url) return
   const sc = (await gltfLoader.loadAsync(url)).scene
   let mesh = null; sc.traverse(o => { if (o.isSkinnedMesh) { mesh = o; o.frustumCulled = false } })
-  if (!mesh) { setStatus('clothing has no skinned mesh'); return }
-  if (item.color != null) mesh.material = new THREE.MeshStandardMaterial({ color: item.color, roughness: 0.85, metalness: 0.0 })
+  if (!mesh) return
+  mesh.renderOrder = item.layer || 1   // draw order: shirt(1) under jacket(2), etc.
   const cit = new Map(charSkinned.skeleton.bones.map(b => [b.name, b]))
-  clothingPairs = mesh.skeleton.bones.map(jb => ({ j: jb, c: cit.get(jb.name) })).filter(p => p.c)
-  charRoot.add(sc); clothingScene = sc
+  const pairs = mesh.skeleton.bones.map(jb => ({ j: jb, c: cit.get(jb.name) })).filter(p => p.c)
+  charRoot.add(sc); attached.set(slot, { scene: sc, pairs })
 }
-const _clP = new THREE.Vector3()
-function syncClothing() {   // drive the garment's skeleton from the citizen's (idempotent per frame)
-  if (!clothingPairs) return
-  for (const { j, c } of clothingPairs) { j.quaternion.copy(c.quaternion); j.position.copy(c.position); j.scale.copy(c.scale) }
+// re-dress all worn garments for the current body (after a model swap)
+async function applyClothingForCurrentBody() {
+  detachAllClothing()
+  for (const [slot, id] of worn) { const item = garmentById(id); if (item) await attachGarment(slot, item) }
+}
+function syncClothing() {   // drive every worn garment's skeleton from the citizen's
+  for (const { pairs } of attached.values())
+    for (const { j, c } of pairs) { j.quaternion.copy(c.quaternion); j.position.copy(c.position); j.scale.copy(c.scale) }
 }
 
 // --- API ------------------------------------------------------------------
@@ -889,33 +893,45 @@ function renderModelDrawer() {
 modelToggleBtn.onclick = () => openModel(!modelDrawer.classList.contains('open'))
 
 // --- Clothing drawer ------------------------------------------------------
-function openClothing(on) {
+async function openClothing(on) {
   if (on) { drawer.classList.remove('open'); modelDrawer.classList.remove('open') }
   clothingDrawer.classList.toggle('open', on)
   syncTabs()
-  if (on) renderClothingDrawer()
+  if (on) { await loadClothingManifest(); renderClothingDrawer() }
 }
+// Toggle a garment in its slot: same item → off; a different item in the same slot
+// replaces it; items in different slots layer together.
 async function toggleClothing(item) {
-  if (clothingWornId === item.id) { clothingWornId = null; detachClothing(); renderClothingDrawer(); setStatus('clothing: off'); return }
+  const slot = item.slot
+  if (worn.get(slot) === item.id) { worn.delete(slot); detachSlot(slot); renderClothingDrawer(); setStatus(`${item.label}: off`); return }
   if (!clothingUrlFor(item, currentCharId)) { setStatus(`${item.label} isn't available for this model`); return }
-  clothingWornId = item.id
+  worn.set(slot, item.id)
   setStatus(`loading ${item.label}…`)
-  try { await applyClothingForCurrentBody(); setStatus(`clothing: ${item.label}`) }
-  catch (e) { setStatus('clothing load failed: ' + e.message); clothingWornId = null }
+  try { await attachGarment(slot, item); setStatus(`wearing ${item.label}`) }
+  catch (e) { setStatus('clothing load failed: ' + e.message); worn.delete(slot) }
   renderClothingDrawer()
 }
 function renderClothingDrawer() {
   const box = document.getElementById('clothing-list'); if (!box) return
   box.innerHTML = ''
-  for (const c of CLOTHING) {
-    const avail = !!clothingUrlFor(c, currentCharId)
-    const b = document.createElement('button')
-    b.className = 'model-opt' + (c.id === clothingWornId ? ' on' : '')
-    b.textContent = (c.id === clothingWornId ? '✓ ' : '') + c.label + (avail ? '' : ' — n/a for this model')
-    b.disabled = !avail && c.id !== clothingWornId
-    b.style.opacity = avail ? '1' : '0.5'
-    b.onclick = () => toggleClothing(c)
-    box.appendChild(b)
+  const bySlot = new Map()
+  for (const c of CLOTHING) { (bySlot.get(c.slot) || bySlot.set(c.slot, []).get(c.slot)).push(c) }
+  for (const slot of SLOT_ORDER) {
+    const items = bySlot.get(slot); if (!items) continue
+    const h = document.createElement('div')
+    h.textContent = SLOT_LABEL[slot] || slot
+    h.style.cssText = 'font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.05em;margin:10px 0 4px'
+    box.appendChild(h)
+    for (const c of items) {
+      const avail = !!clothingUrlFor(c, currentCharId), on = worn.get(slot) === c.id
+      const b = document.createElement('button')
+      b.className = 'model-opt' + (on ? ' on' : '')
+      b.textContent = (on ? '✓ ' : '') + c.label + (avail ? '' : ' — n/a')
+      b.disabled = !avail && !on
+      b.style.opacity = avail ? '1' : '0.5'
+      b.onclick = () => toggleClothing(c)
+      box.appendChild(b)
+    }
   }
 }
 clothingToggleBtn.onclick = () => openClothing(!clothingDrawer.classList.contains('open'))

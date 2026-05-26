@@ -676,6 +676,21 @@ def build_app() -> FastAPI:
             raise HTTPException(404, f"character '{char_id}' not found")
         return {"deleted": char_id}
 
+    @app.get("/clothing")
+    def list_clothing() -> dict:
+        # Clothing manifests written by web/scripts/clothing_add.py: one per garment,
+        # with per-body GLB urls + slot/layer metadata. The viewer's CLOTHING tab reads this.
+        import json as _json
+        from pathlib import Path as _Path
+        root = _Path(os.environ.get("KIMODO_CLOTHING_PATH", ".kimodo-clothing"))
+        items = []
+        for p in sorted(root.glob("*.json")):
+            try:
+                items.append(_json.load(open(p)))
+            except Exception:
+                pass
+        return {"clothing": items}
+
     @app.get("/mixamo/search")
     def mixamo_search(q: str, limit: int = 24) -> dict:
         from kimodo.scripts.mixamo import search_characters, MixamoError

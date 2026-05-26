@@ -222,14 +222,50 @@ variant is `null` (e.g. no female model), fall back to the human-male variant on
 body, as s&box itself does. Clothing only applies to the **citizen** bodies — SMPL-X /
 Mixamo are different shapes and can't wear it.
 
+### Adding clothing — one command (`web/scripts/clothing_add.py`)
+
+`clothing_rig.py` is the per-(garment×body) primitive; **`clothing_add.py` is the
+orchestrator you actually run**. Per `.clothing` file it: reads the variants + slot
+metadata, decompiles each of the 3 body variants (VRF) + the matching **albedo**, rigs
+each onto its body (calling `clothing_rig.py` with the texture baked in), maps
+`Category` → slot, and writes a manifest.
+
+```bash
+cd <kimodo>
+python3 web/scripts/clothing_add.py \
+  ".../citizen_clothes/hat/Cowboy_Hat/cowboy_hat.clothing"   # one or many
+# then reload http://localhost:5173/kata.html — the new garment appears in its slot
+```
+
+- **No API restart needed** — `GET /clothing` re-globs `.kimodo-clothing/*.json` each
+  request; the viewer fetches once per page load, so just reload the page.
+- **Albedo matching:** a folder can hold several garments'/variants' textures, so it
+  picks the colour map whose name matches the `.clothing`'s `Model` stem (e.g.
+  `polo_shirt_white` → `polo_shirt_white_color…`), preferring non-`lens` for glasses.
+- **Category → slot** is a table in the tool (`Hat*`→head, `Glasses*`→face,
+  `TShirt/Tops/Shirt/Knitwear…`→torso_under, `Coat/Jacket/Vest…`→torso_over,
+  `Jeans/Trousers/Shorts`→legs, `Shoes/Trainers/Boots`→feet, `Gloves`→hands). Unknown
+  category → skipped with a message; add the mapping line.
+- **Manifest** `.kimodo-clothing/<id>.json`: `{ id, label, category, slot, layer,
+  slotsUnder, slotsOver, hideBody, glb: { unirig_citizen, unirig_citizen_male,
+  unirig_citizen_female } }`.
+- **Prereqs:** the **VRF CLI** (`Source2Viewer-CLI`) — defaults to `/tmp/vrf/cli`
+  (ephemeral!); set `KIMODO_VRF` to a stable copy, or re-download `cli-linux-x64.zip`
+  from the ValveResourceFormat releases. Plus Blender, the `demo`/motion API + vite, and
+  the UniRig body GLBs in `web/public/models/`.
+
 ### Viewer wiring (`web/src/kata.js`, `kata.html`)
 
-A **CLOTHING** drawer (mirrors MODEL/ACTIONS). Garments are body-agnostic in the UI
-(`clothingWornId`); on toggle/model-swap we resolve the GLB for the *current* body
-(`clothingUrlFor(item, currentCharId)`) — **no forced model swap**. The garment GLB has
-its own copy of `bone_N`; each frame `syncClothing()` copies the citizen's driven bone
-transforms onto the garment's same-named bones (the `syncTwistBones()` pattern), so it
-shares the skeleton and animates with the body. Disabled (greyed) for non-citizen models.
+A **CLOTHING** drawer (mirrors MODEL/ACTIONS), grouped by slot, fed by `GET /clothing`.
+Clothing is **multi-slot**: a `worn` map (`slot → garment id`) holds one garment per slot
+(head/face/torso_under/torso_over/hands/legs/feet) — re-clicking removes it, a different
+item in the same slot replaces, different slots layer together (`renderOrder` from the
+manifest `layer`). The worn set is **body-agnostic**; on toggle/model-swap we resolve each
+garment's GLB for the *current* body (`clothingUrlFor`) and re-attach — **no forced model
+swap**, and an outfit follows you across sausage/male/female. Each garment GLB has its own
+copy of `bone_N`; `syncClothing()` copies the citizen's driven bone transforms onto every
+worn garment's same-named bones (the `syncTwistBones()` pattern). Greyed for non-citizen
+models, and for any garment lacking a variant for the current body.
 
 ### Why all of this exists (the north-star)
 
