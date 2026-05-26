@@ -7,9 +7,10 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js'
 import * as d3 from 'd3'
 import { Animator } from './animator.js'
-import { CHARACTERS } from './rigs.js'
+import { CHARACTERS, getCharacter } from './rigs.js'
 
 const KIMODO_URL = import.meta.env.VITE_KIMODO_URL || 'http://localhost:7862'
 const SMPLX_HEIGHT = 1.7
@@ -75,13 +76,43 @@ for (const [dirv, color] of [[[1, 0, 0], 0xe05555], [[0, 0, 1], 0x5a9bff]]) {
 
 // --- Character + animator (smplx neutral) ---------------------------------
 let animator = null, charRoot = null   // charRoot is yawed live for the rotation control
+let currentMotion = null               // last clip set on the animator (re-applied after a model swap)
+let currentCharId = 'unirig_citizen'   // default model (the UniRig-rigged sbox citizen)
 const gltfLoader = new GLTFLoader()
+const fbxLoader = new FBXLoader()
+// FBX returns the Object3D root directly; GLB wraps it in gltf.scene.
+async function loadCharacterRoot(url) {
+  if (url.toLowerCase().endsWith('.fbx')) return await fbxLoader.loadAsync(url)
+  return (await gltfLoader.loadAsync(url)).scene
+}
+// Multi-mesh FBX (sbox citizen = 8 SkinnedMeshes, each its own copy of the same
+// skeleton) → point every mesh at the first mesh's skeleton so one rig drives all.
+// Returns the mesh whose (richest) skeleton should drive the rig, or null.
+function unifySkeletons(root) {
+  const meshes = []; root.traverse(o => { if (o.isSkinnedMesh) meshes.push(o) })
+  if (meshes.length < 2) return null
+  // Pick the richest skeleton as master so every mesh's skinIndex stays in range.
+  const masterMesh = meshes.reduce((a, b) => b.skeleton.bones.length > a.skeleton.bones.length ? b : a, meshes[0])
+  const master = masterMesh.skeleton
+  for (const mesh of meshes) {
+    // Only rebind a mesh whose skeleton matches master's bone count — rebinding
+    // onto a smaller skeleton leaves skinIndex references dangling (→ crash).
+    if (mesh.skeleton !== master && mesh.skeleton.bones.length === master.bones.length) {
+      mesh.bind(master, mesh.bindMatrix)
+    }
+  }
+  return masterMesh
+}
 async function loadCharacter(cfg) {
-  const gltf = await gltfLoader.loadAsync(cfg.url)
-  const root = gltf.scene
+  if (charRoot) {   // swap: drop the previous mesh first
+    scene.remove(charRoot)
+    charRoot.traverse(o => { o.geometry?.dispose?.(); if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose?.()) })
+    charRoot = null; animator = null
+  }
+  const root = await loadCharacterRoot(cfg.url)
   root.scale.setScalar(cfg.scale ?? 1.0)
   scene.add(root); charRoot = root
-  let skinned = null
+  let skinned = unifySkeletons(root)   // mesh whose (richest) skeleton drives the rig
   root.traverse(o => { if (o.isSkinnedMesh) { if (!skinned) skinned = o; o.frustumCulled = false } })
   root.updateMatrixWorld(true)
   const box = new THREE.Box3().setFromObject(root)
@@ -100,6 +131,32 @@ async function loadCharacter(cfg) {
     mapping: cfg.mapping, blends: cfg.blends || {}, scale: strideScale, groundOffsetY,
     alignMode: target.isSkinnedMesh ? 'rest' : 'none',
   })
+  // Citizen-style rigs split skinning across unparented "*_twist#" bones; pair
+  // each with its main bone so syncTwistBones() can drive the deformation.
+  animator.twistPairs = []
+  const twistRe = /^(.+?)_twist\d+$/
+  const drivable = target.isSkinnedMesh ? target.skeleton.bones : []
+  for (const tb of drivable) {
+    const mm = twistRe.exec(tb.name); if (!mm) continue
+    const mainBone = animator.bonesByName[animator._normName(mm[1])]
+    if (mainBone && mainBone !== tb) animator.twistPairs.push({ twist: tb, main: mainBone })
+  }
+  if (currentMotion) { animator.setMotion(currentMotion, { loop: true }); setScrubRange(currentMotion) }   // keep playing after a model swap
+}
+// Copy each main bone's world rotation onto its twist bone (in the twist's parent
+// space) — needed for citizen rigs whose twist bones aren't under the main bone.
+const _twP = new THREE.Vector3(), _twS = new THREE.Vector3(), _twQ = new THREE.Quaternion(), _twPQ = new THREE.Quaternion()
+function syncTwistBones() {
+  const a = animator; if (!a?.twistPairs?.length) return
+  for (const { twist, main } of a.twistPairs) {
+    main.updateMatrixWorld(true)
+    main.matrixWorld.decompose(_twP, _twQ, _twS)
+    if (twist.parent) {
+      twist.parent.updateMatrixWorld(true)
+      twist.parent.matrixWorld.decompose(_twP, _twPQ, _twS)
+      twist.quaternion.copy(_twPQ.invert().multiply(_twQ))
+    } else twist.quaternion.copy(_twQ)
+  }
 }
 
 // --- API ------------------------------------------------------------------
@@ -355,7 +412,7 @@ async function select(id) {
   try {
     if (mode === 'move') {
       const m = await fetchAnimation(id)
-      animator?.setMotion(m, { loop: true })
+      animator?.setMotion(m, { loop: true }); currentMotion = m
       playSegs = [{ id, start: 0, end: m.num_frames, lo: 0, hi: m.num_frames }]
       setScrubRange(m)
       setStatus(`move: ${name}`)
@@ -363,7 +420,7 @@ async function select(id) {
       const path = pathToRoot(id)
       setStatus(`stitching ${path.length} moves…`)
       const m = await stitchPath(path)
-      animator?.setMotion(m, { loop: true })
+      animator?.setMotion(m, { loop: true }); currentMotion = m
       setScrubRange(m)
       // Frame ranges of each move within the stitched clip — must mirror the
       // server's cut: a clip keeps [lo..hi), where lo drops the seam frame 0 on
@@ -530,7 +587,7 @@ async function previewAction(act) {
   previewingPrompt = act.prompt; previewClipId = clip.id; renderDrawer()   // highlight + show playback controls right away
   const m = await fetchAnimation(clip.id)
   if (charRoot) charRoot.rotation.y = 0                                     // each preview starts unrotated
-  animator?.setMotion(m, { loop: true })
+  animator?.setMotion(m, { loop: true }); currentMotion = m
   selectedId = null; activeId = null; pathSet = new Set(); refreshNodeStyles()
   playSegs = [{ id: clip.id, start: 0, end: m.num_frames, lo: 0, hi: m.num_frames }]   // drives the scrubber; no tree node to highlight
   setScrubRange(m); renderDrawer()                          // re-render so the card scrubber gets the right range
@@ -714,19 +771,82 @@ function renderDrawer() {
   if (editTa) { editTa.focus(); editTa.select() }
 }
 const drawer = document.getElementById('actions-drawer')
-const drawerToggle = document.getElementById('drawer-toggle')
+const modelDrawer = document.getElementById('model-drawer')
+const leftTabs = document.getElementById('left-tabs')
+const drawerToggleBtn = document.getElementById('drawer-toggle')
+const modelToggleBtn = document.getElementById('model-toggle')
+const DRAWER_W = 330
+// Tabs stay docked to the right edge of whichever drawer is open (so you can tab
+// between them with one open), and highlight the active one.
+function syncTabs() {
+  const aOpen = drawer.classList.contains('open'), mOpen = modelDrawer.classList.contains('open')
+  leftTabs.style.left = (aOpen || mOpen) ? DRAWER_W + 'px' : '0'
+  drawerToggleBtn.classList.toggle('active', aOpen)
+  modelToggleBtn.classList.toggle('active', mOpen)
+}
 function openDrawer(on) {
+  if (on) modelDrawer.classList.remove('open')   // one drawer at a time
   drawer.classList.toggle('open', on)
-  drawerToggle.style.display = on ? 'none' : 'block'
+  syncTabs()
   if (on) loadActionClips().then(renderDrawer)
   else { aScrub = aLabel = aPlayBtn = null }   // drop refs to removed card controls
 }
-drawerToggle.onclick = () => openDrawer(true)
-document.getElementById('drawer-close').onclick = () => openDrawer(false)
+drawerToggleBtn.onclick = () => openDrawer(!drawer.classList.contains('open'))
+
+// --- Model picker drawer --------------------------------------------------
+// A small curated set: the UniRig sbox citizens (sausage default + human male) +
+// SMPL-X. The citizens come from the character registry; SMPL-X is a built-in.
+const CURATED_MODEL_IDS = ['unirig_citizen', 'unirig_citizen_male', 'unirig_citizen_female', 'smplx']
+let MODEL_OPTIONS = []
+let registryLoaded = false
+async function loadRegistryModels() {
+  if (registryLoaded) return
+  let regs = []
+  try { regs = ((await (await fetch(`${KIMODO_URL}/characters`)).json()).characters) || [] }
+  catch (e) { console.warn('character registry fetch failed', e) }
+  const byId = new Map([...CHARACTERS, ...regs].map(c => [c.id, c]))
+  MODEL_OPTIONS = CURATED_MODEL_IDS.map(id => byId.get(id)).filter(Boolean)
+  registryLoaded = true
+}
+function openModel(on) {
+  if (on) drawer.classList.remove('open')
+  modelDrawer.classList.toggle('open', on)
+  syncTabs()
+  if (on) loadRegistryModels().then(renderModelDrawer)
+}
+async function selectModel(id) {
+  if (id === currentCharId) return
+  const cfg = MODEL_OPTIONS.find(c => c.id === id) || getCharacter(id)
+  setStatus(`loading model ${cfg.label || cfg.id}…`)
+  currentCharId = id; renderModelDrawer()
+  try { await loadCharacter(cfg); setStatus(`model: ${cfg.label || cfg.id}`) }
+  catch (e) { setStatus('model load failed: ' + e.message) }
+}
+function renderModelDrawer() {
+  const box = document.getElementById('model-list'); if (!box) return
+  box.innerHTML = ''
+  for (const c of MODEL_OPTIONS) {
+    const b = document.createElement('button')
+    b.className = 'model-opt' + (c.id === currentCharId ? ' on' : '')
+    b.textContent = c.label || c.id
+    b.onclick = () => selectModel(c.id)
+    box.appendChild(b)
+  }
+}
+modelToggleBtn.onclick = () => openModel(!modelDrawer.classList.contains('open'))
+// Click outside an open drawer to dismiss it — but NOT on the tabs, and NOT on
+// the 3D viewport (so orbiting the camera doesn't close the drawer).
+document.addEventListener('pointerdown', (e) => {
+  if (!drawer.classList.contains('open') && !modelDrawer.classList.contains('open')) return
+  if (drawer.contains(e.target) || modelDrawer.contains(e.target) || leftTabs.contains(e.target) || app.contains(e.target)) return
+  drawer.classList.remove('open'); modelDrawer.classList.remove('open')
+  syncTabs(); aScrub = aLabel = aPlayBtn = null
+})
 
 // --- Boot -----------------------------------------------------------------
 function tick() {
   animator?.update()
+  syncTwistBones()
   // The move whose segment is playing: highlight + pulse it, and run a playhead
   // down its timeline bar tracking the exact frame on screen.
   let shown = false
@@ -771,8 +891,8 @@ function tick() {
 }
 async function init() {
   setStatus('loading character…')
-  const smplx = CHARACTERS.find(c => c.id === 'smplx') || CHARACTERS[0]
-  await loadCharacter(smplx)
+  await loadRegistryModels()   // so the default (registry) citizen config is available
+  await loadCharacter(MODEL_OPTIONS.find(c => c.id === currentCharId) || getCharacter(currentCharId))
   tick()
   await refreshTree()
 }

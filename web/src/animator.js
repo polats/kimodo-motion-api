@@ -134,10 +134,13 @@ export class Animator {
     const pairs = []
     const missing = []
     const unmapped = []
-    const idxByKimodoName = Object.fromEntries(motion.bone_names.map((n, i) => [n, i]))
+    // Some stored clips lack bone_names (saved before the model lazy-loaded); the
+    // arrays are always in kimodo's canonical 22-joint order, so fall back to it.
+    const names = (motion.bone_names && motion.bone_names.length) ? motion.bone_names : Object.keys(KIMODO_PARENT)
+    const idxByKimodoName = Object.fromEntries(names.map((n, i) => [n, i]))
 
-    for (let kIdx = 0; kIdx < motion.bone_names.length; kIdx++) {
-      const kName = motion.bone_names[kIdx]
+    for (let kIdx = 0; kIdx < names.length; kIdx++) {
+      const kName = names[kIdx]
       const tName = this.mapping[kName]
       if (!tName) { unmapped.push(kName); continue }
       const bone = this.bonesByName[this._normName(tName)]

@@ -79,6 +79,72 @@ Other gotchas:
   about shadows; use `SceneObject.RenderingEnabled = false` to actually hide a
   model that must keep updating.
 
+## Previewing kimodo motion on an s&box citizen in the web viewer
+
+The baker above is the **production** path (offline, Blender-solved, clean). To
+*preview* kimodo motion on an s&box citizen **live** in the `/kata` web viewer,
+you cannot use the citizen's native rig — it does not live-retarget cleanly:
+
+- Bind is an **A-pose** (arms ~45° down); kimodo motion is authored relative to
+  SMPL-X's near-**T** rest, so the live retargeter's `'rest'`/`'frame'` align
+  modes contort the arms (this is exactly what the baker solves with its virtual
+  T-pose conjugation — see "Bake math" in `baker/README.md`).
+- Citizen bone local axes are head→tail **+X** (not the convention the retargeter
+  assumes), plus split-skinning **twist bones** not parented under their main bone.
+- The raw FBX loads **lying down** (Source 2 is Z-up; three's `FBXLoader` doesn't
+  reorient into the Y-up world) and **huge** (cm, not metres).
+
+**The fix that works: re-rig the citizen MESH onto a clean standard skeleton,
+posed to a T, via UniRig.** Then it retargets like any clean T-pose rig
+(`alignMode:'rest'`, the same path Mixamo uses).
+
+### Pipeline (run per body — sausage `citizen_lod2`, `…male_REF`, `…female_REF`)
+
+1. **T-pose + extract** → `web/scripts/tpose_citizen_mesh.py` (headless Blender):
+   imports the citizen FBX, poses the arm chain to a virtual T (same logic as
+   `baker/bake.py`'s `capture_virtual_tpose_quats`), **bakes** that pose into the
+   geometry, **applies each sub-mesh's object transform *before* joining** — the
+   citizen FBX mixes cm/m sub-mesh scales, and joining without this flattens the
+   whole thing into a 9×9 blob — normalizes to 1.8 m, exports a bare GLB.
+   `blender -b -P web/scripts/tpose_citizen_mesh.py -- <citizen.fbx> <out.glb>`
+   (sanity-check the output is ~`x1.8 y0.3 z1.8`, i.e. an upright T-pose human).
+2. **Auto-rig** via the UniRig service (`POST /rig`, multipart `file`):
+   `curl -F file=@out.glb http://localhost:8081/rig -o rigged.glb`.
+   ⚠ UniRig shares the 24 GB GPU with kimodo; its skin step **OOMs** unless you
+   free VRAM first: `docker stop text-encoder` (kimodo's ~15 GB encoder), rig,
+   then `docker start text-encoder`.
+3. **Register** → `python web/scripts/import_unirig_glb.py rigged.glb --id
+   unirig_citizen_male --label "sbox Citizen Male (UniRig)"` — copies to
+   `web/public/models/` and writes `.kimodo-characters/<id>.json` with a 22-joint
+   `mapping` (`unirig_mapping.py` labels UniRig's anonymous `bone_N` by topology +
+   X-sign, so the rig must be upright/standard for it to label correctly).
+4. **Show it** → add the id to `CURATED_MODEL_IDS` in `web/src/kata.js` (the /kata
+   MODEL drawer), or it surfaces via `GET /characters` automatically.
+
+**Why the T-pose is non-negotiable:** UniRig fits its skeleton's rest to the
+*input* pose. Rig an A-pose mesh → rest is A-pose → same mismatch → contorted.
+Rig a T-pose mesh → rest ≈ SMPL-X → clean. Verify the rigged output is upright
+(Y-up: head at top, feet at bottom, wrists lateral, left=+X/right=−X).
+
+### Citizen model facts (the LOD / head trap)
+
+- `citizen.vmdl` is **modular**: a body (torso/legs/hands/feet) + a **Head
+  bodygroup** + clothing. Heads are **separate models** (`citizen_human/heads/…`).
+- The Head bodygroup has LODs **0, 2, 3, 4 — there is no LOD1**. So
+  `citizen_lod1.fbx` (the "sausage") is **headless**; use **`citizen_lod2.fbx`**
+  (abstract body + `CitizenHead_LOD2`) or the full `citizen_human_{male,female}_REF.fbx`.
+- Units are **cm** (×0.01 → metres); FBX is **Z-up**. Source FBXs ship in the
+  s&box install under `…/addons/citizen/Assets/models/citizen…`.
+
+### Web-viewer gotchas
+- Clips generated right after the diffusion model lazy-loads can be saved with
+  **empty `bone_names`**; the Animator falls back to kimodo's canonical 22-joint
+  order (`Object.keys(KIMODO_PARENT)` in `web/src/rigs.js`) so retargeting still
+  resolves. (Fix the API side too if other consumers read the JSON.)
+- Loading the native FBX directly needs `FBXLoader` + a `unifySkeletons` pass
+  (citizen = several meshes sharing one skeleton) + twist-bone syncing — the
+  T-pose→UniRig GLB avoids all of that.
+
 ## Reference implementation
 
 woid (in the `sbox-public` repo) is the worked example: `KimodoSequencePlayer`

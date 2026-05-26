@@ -52,18 +52,22 @@
     .cam-btn:hover { background: rgba(62,62,70,0.9); }
     .cam-btn.on { background: #2d4a35; border-color: #3a6; color: #7ec77e; }
     /* Actions drawer (left, slide-in) */
-    #drawer-toggle {
-      position: fixed; left: 0; top: 50%; transform: translateY(-50%); z-index: 31;
-      writing-mode: vertical-rl; padding: 16px 5px; font-size: 12px; letter-spacing: 2px; cursor: pointer;
+    #left-tabs { position: fixed; left: 0; top: 50%; transform: translateY(-50%); z-index: 31; display: flex; flex-direction: column; gap: 6px; transition: left .22s ease; }
+    .left-tab {
+      writing-mode: vertical-rl; padding: 14px 5px; font-size: 12px; letter-spacing: 2px; cursor: pointer;
       background: rgba(40,40,46,0.92); color: #cdd; border: 1px solid #4a4a52; border-left: none; border-radius: 0 8px 8px 0;
     }
-    #drawer-toggle:hover { background: rgba(62,62,70,0.95); }
-    #actions-drawer {
+    .left-tab:hover { background: rgba(62,62,70,0.95); }
+    .left-tab.active { background: #2d4a35; border-color: #3a6; color: #9fd; }
+    #actions-drawer, #model-drawer {
       position: fixed; top: 0; left: 0; width: 330px; height: 100%; z-index: 30;
       background: rgba(20,20,24,0.97); backdrop-filter: blur(6px); border-right: 1px solid #3a3a40;
       padding: 12px; overflow-y: auto; transform: translateX(-100%); transition: transform .22s ease;
     }
-    #actions-drawer.open { transform: translateX(0); }
+    #actions-drawer.open, #model-drawer.open { transform: translateX(0); }
+    .model-opt { display: block; width: 100%; text-align: left; margin-bottom: 6px; padding: 9px 11px; font-size: 13px; cursor: pointer; border-radius: 7px; background: #26262b; color: #e3e3e8; border: 1px solid #3a3a40; }
+    .model-opt:hover { background: #30303a; }
+    .model-opt.on { background: #2d4a35; border-color: #3a6; color: #9fd; }
     .action-card { position: relative; background: #26262b; border: 1px solid #3a3a40; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
     .action-card .nm { font-size: 13px; font-weight: 600; color: #e3e3e8; padding-right: 18px; }
     .action-card .dur-badge { font-size: 10px; font-weight: 500; color: #9aa; background: #2f2f37; border-radius: 4px; padding: 1px 5px; margin-left: 4px; }
@@ -129,12 +133,17 @@
     <button id="axis-x" class="axis-btn ax-x" title="Align view down the X axis">X</button>
     <button id="axis-z" class="axis-btn ax-z" title="Align view down the Z axis (front)">Z</button>
   </div>
-  <button id="drawer-toggle" title="Open the actions library">ACTIONS</button>
+  <div id="left-tabs">
+    <button id="drawer-toggle" class="left-tab" title="Open the actions library">ACTIONS</button>
+    <button id="model-toggle" class="left-tab" title="Choose the character model">MODEL</button>
+  </div>
+  <div id="model-drawer">
+    <h2 style="font-size:14px;margin:0 0 6px">Model</h2>
+    <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.4">The kimodo animation retargets onto any of these rigs. Pick one to swap the character — what's playing carries over.</div>
+    <div id="model-list"></div>
+  </div>
   <div id="actions-drawer">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-      <h2 style="font-size:14px;margin:0">Actions library</h2>
-      <button id="drawer-close" style="background:none;border:none;color:#aaa;font-size:18px;cursor:pointer">✕</button>
-    </div>
+    <h2 style="font-size:14px;margin:0 0 6px">Actions library</h2>
     <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.4">Reusable moves for building katas. <b>Preview</b> plays it in the viewer; <b>regenerate</b> makes a fresh take.</div>
     <div id="actions-list"></div>
   </div>

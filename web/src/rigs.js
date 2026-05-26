@@ -237,8 +237,10 @@ export const CHARACTERS = [
   // loadCharacterRoot. Sausage / abstract variant first (citizen_lod1.fbx).
   {
     id: 'citizen_sbox',
-    label: 'sbox Citizen (sausage)',
-    url: '/models/citizen_sbox.fbx',
+    label: 'sbox Citizen (abstract)',
+    // LOD2, not LOD1: the abstract/"sausage" body PLUS a head (CitizenHead_LOD2).
+    // LOD1 deliberately has no head mesh, so it loaded headless.
+    url: '/models/citizen_lod2.fbx',
     skinned: true,
     mapping: citizenMapping(),
     scale: 0.01,  // sbox units are inches; kimodo data is meters → scale 1u→1cm

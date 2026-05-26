@@ -66,9 +66,11 @@ Read the matching rule before going deep:
   AMASS/G1-CSV (research/robotics, via the CLI + `kimodo_convert`), SMPL-X mesh
   GLB. Which format for which target. **Read before exporting anywhere but s&box.**
 - **`rules/sbox-integration.md`** — the baker (`ExtractMotion` root motion, curated
-  set, `gen_vmdl`, `kim_` naming) and in-engine playback (full-body takeover vs
-  masked upper-body overlay) + the retargeting gotcha. **Read to use clips in
-  s&box** — and pair it with the `sbox-gamedev` skill.
+  set, `gen_vmdl`, `kim_` naming), in-engine playback (full-body takeover vs
+  masked upper-body overlay) + the retargeting gotcha, **and previewing kimodo
+  motion on an s&box citizen in the web viewer via the T-pose→UniRig re-rig**
+  (the native citizen rig won't live-retarget — A-pose bind, +X bone axes, LOD/head
+  facts). **Read to use clips in s&box** — pair with the `sbox-gamedev` skill.
 
 ### End-to-end workflow
 1. `kimodo-doctor` → fix anything red.
