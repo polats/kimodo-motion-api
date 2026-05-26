@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import threading
 
 import gradio as gr
 import numpy as np
@@ -33,12 +34,27 @@ TEXT_ENCODER_PRESETS = {
 
 
 class DemoWrapper:
-    def __init__(self, text_encoder, tmp_folder):
-        self.text_encoder = text_encoder
+    def __init__(self, builder, tmp_folder):
+        # Lazy: the (large, ~15GB LLM2Vec-8B) encoder loads on the FIRST request,
+        # not at server start — so the container boots fast and holds no GPU until
+        # a generation actually needs an embedding.
+        self._builder = builder
+        self._encoder = None
+        self._lock = threading.Lock()
         self.tmp_folder = tmp_folder
 
+    @property
+    def text_encoder(self):
+        if self._encoder is None:
+            with self._lock:
+                if self._encoder is None:
+                    print("[text-encoder] lazy-loading model on first request...", flush=True)
+                    self._encoder = self._builder()
+                    print("[text-encoder] model loaded", flush=True)
+        return self._encoder
+
     def __call__(self, text, filename, progress=gr.Progress()):
-        # Compute text embedding
+        # Compute text embedding (loads the model on first call)
         tensor, length = self.text_encoder(text)
         embedding = tensor[:length]
         embedding = embedding.cpu().numpy()
@@ -94,9 +110,9 @@ def main():
     server_port = int(_get_env("GRADIO_SERVER_PORT", DEFAULT_SERVER_PORT))
     theme, css = get_gradio_theme()
     os.makedirs(args.tmp_folder, exist_ok=True)
-    text_encoder = _build_text_encoder(args.text_encoder, args.fp32)
     display_name = TEXT_ENCODER_PRESETS[args.text_encoder]["display_name"]
-    demo_wrapper_fn = DemoWrapper(text_encoder, args.tmp_folder)
+    # Pass a builder (not a built model) so the encoder loads lazily on first use.
+    demo_wrapper_fn = DemoWrapper(lambda: _build_text_encoder(args.text_encoder, args.fp32), args.tmp_folder)
 
     with gr.Blocks(title="Text encoder", css=css, theme=theme) as demo:
         gr.Markdown(f"# Text encoder: {display_name}")

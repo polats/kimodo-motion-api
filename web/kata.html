@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kimodo — Kata Tree</title>
+  <style>
+    * { margin: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: #1a1a1a; color: #ddd; overflow: hidden; }
+    #app { position: fixed; inset: 0; }
+    #panel {
+      position: fixed; top: 0; left: 0; width: 480px; height: 100%;
+      background: rgba(28,28,30,0.82); backdrop-filter: blur(6px);
+      padding: 12px; border-right: 1px solid #333; display: flex; flex-direction: column;
+    }
+    #panel h1 { font-size: 15px; margin-bottom: 4px; }
+    #panel .sub { font-size: 12px; color: #888; margin-bottom: 10px; line-height: 1.4; }
+    #status { font-size: 12px; color: #7ec77e; margin-bottom: 10px; min-height: 1em; }
+    #tree-svg { flex: 1; width: 100%; background: #1c1c1f; border: 1px solid #333; border-radius: 6px; cursor: grab; }
+    #tree-svg:active { cursor: grabbing; }
+    #tree-svg text { user-select: none; }
+    .bar { display: flex; gap: 6px; margin-bottom: 10px; }
+    .bar button {
+      flex: 1; padding: 7px; font-size: 12px; cursor: pointer; border-radius: 6px;
+      background: #34343a; color: #ddd; border: 1px solid #444;
+    }
+    .bar button:hover { background: #3f3f48; }
+    .bar button.on { background: #3a4a6a; border-color: #5a8; color: #fff; }
+    ul.tree, ul.tree ul { list-style: none; }
+    ul.tree ul { margin-left: 12px; border-left: 1px solid #3a3a3a; padding-left: 10px; }
+    .node {
+      display: flex; align-items: center; gap: 8px;
+      padding: 5px 8px; margin: 2px 0; border-radius: 6px; cursor: pointer; font-size: 13px;
+      background: #2c2c2e; border: 1px solid #3a3a3c; transition: background .1s;
+      white-space: nowrap;
+    }
+    .node:hover { background: #38383e; }
+    .node.sel { background: #3a4a6a; border-color: #5a8; color: #fff; }
+    .node.path { background: #4a3a2a; border-color: #c95; }
+    .node .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize; }
+    .node .meta { font-size: 11px; color: #888; }
+    ul.tree > li > .node { border-left: 3px solid #6a5; }
+    #cam-controls { position: fixed; top: 12px; left: 492px; z-index: 10; display: flex; gap: 6px; }
+    .cam-btn {
+      width: 36px; height: 36px; font-size: 17px; line-height: 1; cursor: pointer; border-radius: 8px;
+      background: rgba(40,40,46,0.85); color: #cdd; border: 1px solid #4a4a52; backdrop-filter: blur(4px);
+    }
+    .cam-btn:hover { background: rgba(62,62,70,0.9); }
+    .cam-btn.on { background: #2d4a35; border-color: #3a6; color: #7ec77e; }
+    /* Actions drawer (left, slide-in) */
+    #drawer-toggle {
+      position: fixed; left: 0; top: 50%; transform: translateY(-50%); z-index: 31;
+      writing-mode: vertical-rl; padding: 16px 5px; font-size: 12px; letter-spacing: 2px; cursor: pointer;
+      background: rgba(40,40,46,0.92); color: #cdd; border: 1px solid #4a4a52; border-left: none; border-radius: 0 8px 8px 0;
+    }
+    #drawer-toggle:hover { background: rgba(62,62,70,0.95); }
+    #actions-drawer {
+      position: fixed; top: 0; left: 0; width: 330px; height: 100%; z-index: 30;
+      background: rgba(20,20,24,0.97); backdrop-filter: blur(6px); border-right: 1px solid #3a3a40;
+      padding: 12px; overflow-y: auto; transform: translateX(-100%); transition: transform .22s ease;
+    }
+    #actions-drawer.open { transform: translateX(0); }
+    .action-card { background: #26262b; border: 1px solid #3a3a40; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
+    .action-card .nm { font-size: 13px; font-weight: 600; color: #e3e3e8; }
+    .action-card .pr { font-size: 11px; color: #888; margin: 2px 0 7px; line-height: 1.35; }
+    .action-card .row { display: flex; gap: 6px; }
+    .action-card button { padding: 5px 8px; font-size: 12px; border-radius: 5px; cursor: pointer; background: #34343a; color: #ddd; border: 1px solid #444; }
+    .action-card button.prev { flex: 1; }
+    .action-card button:hover:not(:disabled) { background: #3f3f48; }
+    .action-card button:disabled { opacity: .5; cursor: default; }
+    .action-card.playing { border-color: #5fb98c; background: #21302a; }
+    .action-card .badge { font-size: 10px; font-weight: 500; margin-left: 5px; color: #7ec77e; }
+    .action-card .badge.gen { color: #e0b060; }
+    .action-card.playing button.prev { background: #2d4a35; border-color: #3a6; color: #7ec77e; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { display: inline-block; animation: spin .9s linear infinite; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="cam-controls">
+    <button id="cam-follow" class="cam-btn" title="Lock camera to follow the character">🎥</button>
+    <button id="cam-reset" class="cam-btn" title="Reset to the default view">⌖</button>
+  </div>
+  <button id="drawer-toggle" title="Open the actions library">ACTIONS</button>
+  <div id="actions-drawer">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <h2 style="font-size:14px;margin:0">Actions library</h2>
+      <button id="drawer-close" style="background:none;border:none;color:#aaa;font-size:18px;cursor:pointer">✕</button>
+    </div>
+    <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.4">Reusable moves for building katas. <b>Preview</b> plays it in the viewer; <b>regenerate</b> makes a fresh take.</div>
+    <div id="actions-list"></div>
+  </div>
+  <div id="panel">
+    <h1>Kata move tree</h1>
+    <div class="sub">Each node is its own move clip. <b>Click a move</b> to play the whole path up to it (<span style="color:#ffe14a">yellow</span>); <b>click it again</b> to view just that move (<span style="color:#4ea8ff">blue</span>). Use ▶ / drag the scrubber to move through the frames.</div>
+    <div style="margin:8px 0">
+      <label style="font-size:12px;color:#aaa;margin-right:6px">Kata</label>
+      <select id="kata-select" style="background:#26262b;color:#e3e3e8;border:1px solid #4a4a52;border-radius:5px;padding:5px 8px;font-size:13px;min-width:220px"></select>
+    </div>
+    <div class="bar" style="gap:8px;align-items:center">
+      <button id="play-pause" title="play / pause" style="padding:4px 9px;font-size:13px;min-width:36px">▶</button>
+      <input type="range" id="frame-scrub" min="0" max="1" value="0" step="1" style="flex:1;cursor:pointer" />
+      <span id="frame-label" style="font-size:11px;color:#aaa;min-width:62px;text-align:right">—</span>
+    </div>
+    <div id="status">loading…</div>
+    <svg id="tree-svg"></svg>
+    <div style="font-size:11px;color:#777;margin-top:6px">scroll = zoom · drag = pan · click once = play path · click again = view move · pulsing ● = playing now</div>
+  </div>
+  <script type="module" src="/src/kata.js"></script>
+</body>
+</html>

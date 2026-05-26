@@ -24,8 +24,10 @@ services:
       # Host user mapping (for non-root ownership + proper shell prompt)
       - HOST_USER=${USER:-user}
 
-      # Run the text encoder on CPU so the demo container gets the full GPU.
-      - TEXT_ENCODER_DEVICE=cpu
+      # Text encoder on GPU: encoding on CPU was the generation bottleneck
+      # (~40s/prompt). The diffusion model is small (~4GB of 24GB used), so there's
+      # ample VRAM headroom for both. Revert to cpu if VRAM ever gets tight.
+      - TEXT_ENCODER_DEVICE=cuda
 
       # GPU
       - NVIDIA_VISIBLE_DEVICES=all

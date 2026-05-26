@@ -21,8 +21,12 @@ web/scripts/tools/*
 # kimodo-motion/build-and-push.sh; cleaned up on script exit.
 Dockerfile.kimodo-motion
 
-# Local persistence of generated motion clips.
+# Local persistence of generated motion clips (+ archived snapshots).
 .kimodo-animations/
+.kimodo-animations-archive/
+
+# Transient debug renders (trajectory/stitch top-down PNGs at repo root).
+/_*.png
 
 # Cached Mixamo character FBX downloads (server-side, transient).
 .mixamo-cache/

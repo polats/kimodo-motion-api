@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Optional, Protocol
 
 
-_META_FIELDS = ("id", "prompt", "seconds", "fps", "num_frames", "model", "created_at")
+_META_FIELDS = ("id", "prompt", "seconds", "fps", "num_frames", "model", "created_at", "continues_from")
 
 
 def _split_meta(record: dict[str, Any]) -> dict[str, Any]:
