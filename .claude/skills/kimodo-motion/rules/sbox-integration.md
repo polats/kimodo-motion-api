@@ -145,6 +145,102 @@ Rig a T-pose mesh → rest ≈ SMPL-X → clean. Verify the rigged output is upr
   (citizen = several meshes sharing one skeleton) + twist-bone syncing — the
   T-pose→UniRig GLB avoids all of that.
 
+## Extracting s&box clothing meshes (decompile `.vmdl_c` → glTF)
+
+s&box clothing (`…/addons/citizen/Assets/models/citizen_clothes/*`) ships **only
+as compiled `.vmdl_c`** — no source FBX/`.blend` (the docs' `first-time-setup`
+has artists build clothing *around* `citizen_REF.fbx` and never publishes the
+result; the body REF fbx is the *input* to authoring clothes, not the clothes).
+To get a garment mesh into three.js you must decompile it.
+
+**Tool: ValveResourceFormat / Source2Viewer-CLI** (the `cli-linux-x64.zip` asset
+on its GitHub releases — a self-contained `linux-x64` binary, no `dotnet`
+needed). The clothing `.vmdl_c` are **loose files** in the install (not packed in
+`.vpk`), so point the CLI straight at one:
+
+```bash
+Source2Viewer-CLI -i <garment>.vmdl_c -o out/garment.glb -d \
+    --gltf_export_format glb --gltf_export_animations --gltf_export_materials
+```
+
+- **`--gltf_export_animations` is mandatory** even though we don't want the
+  anims: without it VRF writes the `JOINTS_0`/`WEIGHTS_0` vertex data but emits
+  **`skins=0`** (no armature, no bone names) — looks broken. With it you get
+  `skins=1` + the named bones the mesh is weighted to.
+- Garments are skinned **by reference to the shared citizen skeleton** — they
+  don't embed their own. VRF resolves the **native bone names**: a shoe →
+  `ankle_R/L`, `ball_R/L`, `leg_lower_*_twist*`; a jacket → `pelvis`, `spine_0..2`,
+  `clavicle_*`, `arm_*`, `hand_*`, `neck_0`, `head`. The body
+  (`citizen_human_male.vmdl_c`) decompiles to the **full ~96-bone named native
+  skeleton**, and every garment's bones are an exact-name **subset** of it.
+- A `<name>_physics.glb` is also written (collision hull — ignore). The garment's
+  own `.vmat` usually loads; some body face-**morph** `.vtex_c` fail to resolve —
+  cosmetic (textures/morphs); geometry + skin are unaffected.
+
+**Consequence for retargeting:** because body and garments land on the *same
+named* native skeleton, binding a garment to the viewer citizen is a **name-based
+bone remap** (`ankle_R` → our joint / UniRig `bone_N`), not blind index matching.
+
+## Rigging a garment onto the viewer citizen (`web/scripts/clothing_rig.py`)
+
+The garment is skinned to the citizen's **native** skeleton, but the viewer citizen
+rides a **UniRig `bone_N`** skeleton (see above). So we re-rig each garment onto
+`bone_N`. Inputs per body: the UniRig body GLB (weight source), the matching **REF
+FBX**, and the decompiled garment variant. The script:
+
+1. **Drive the garment with the REF FBX armature** it was authored to — *not* a
+   reconstructed skeleton. This is the make-or-break insight: the docs say clothing
+   is "skinned to" `citizen_REF.fbx` / `citizen_human_male_REF.fbx`, and VRF confirms
+   the garment's vertex groups are an exact-name subset of the REF rig with **identical
+   rest** (pelvis/spine/clavicle/hand match to the mm). Binding the garment mesh to the
+   REF armature is therefore **identity at rest** → no collapse. (Binding to VRF's
+   *reconstructed* body skeleton collapses the mesh — its bone frames/rest differ.)
+   Reframe the garment into the armature's object space first so the modifier is identity.
+2. **Pose the REF arm chain to the virtual-T** (same `CHAIN`/`SMPLX_REST_WORLD` logic as
+   `tpose_citizen_mesh.py`). The garment's degenerate/reduced skeleton doesn't matter —
+   the full REF rig drives it; the twist/helper bones the garment rides are children of
+   the arm bones, so they follow.
+3. **Fit by reproducing the body's own normalize transform** — do **not** landmark-guess
+   the scale. The garment is authored to the REF body; the UniRig body is that *same*
+   body after `tpose_citizen_mesh.py` scaled it to 1.8 m and centred its bbox. The REF
+   FBX *contains the body mesh*, so pose it to T too, measure its height + bbox centre,
+   and apply the identical `scale·(p − mid)` to the garment. It lands exactly, for every
+   body and garment. (Landmark fits — pelvis↔head, whole-body, torso — all failed: the
+   bodies are reproportioned differently by the 1.8 m normalize, so no single uniform
+   landmark scale fits all; the abstract citizen's big head and the humans' legs each
+   skew different choices.)
+4. **Transfer `bone_N` weights** from the already-rigged UniRig body mesh
+   (`data_transfer` VGROUP_WEIGHTS, nearest-surface), bind the garment to the UniRig
+   armature, export a GLB skinned to `bone_N` (UVs preserved → textures applyable).
+
+### Per-body matrix + variant selection
+
+Clothing is **per body**: rig each garment once per citizen variant, picking the mesh
+the `.clothing` file names — `Model` → sausage (`unirig_citizen`, REF `citizen_REF.fbx`),
+`HumanAltModel` (`_m_human`) → male, `HumanAltFemaleModel` (`_f_human`) → female. When a
+variant is `null` (e.g. no female model), fall back to the human-male variant on that
+body, as s&box itself does. Clothing only applies to the **citizen** bodies — SMPL-X /
+Mixamo are different shapes and can't wear it.
+
+### Viewer wiring (`web/src/kata.js`, `kata.html`)
+
+A **CLOTHING** drawer (mirrors MODEL/ACTIONS). Garments are body-agnostic in the UI
+(`clothingWornId`); on toggle/model-swap we resolve the GLB for the *current* body
+(`clothingUrlFor(item, currentCharId)`) — **no forced model swap**. The garment GLB has
+its own copy of `bone_N`; each frame `syncClothing()` copies the citizen's driven bone
+transforms onto the garment's same-named bones (the `syncTwistBones()` pattern), so it
+shares the skeleton and animates with the body. Disabled (greyed) for non-citizen models.
+
+### Why all of this exists (the north-star)
+
+Every transform above is forced by the viewer riding **UniRig**, not the native rig.
+Clothing already fits + deforms perfectly in s&box because the body *and* the clothing
+share the native rig. If the web animator could retarget kimodo motion onto the **native
+citizen rig** (what the baker does offline — the hard problem UniRig was chosen to dodge),
+clothing would be **decompile-and-drop-in**: no T-pose, no scale, no re-skin, exact fit,
+plus `HideBody`/bodygroups. That's the architectural end state; the current pipeline is
+the contained path that works today.
+
 ## Reference implementation
 
 woid (in the `sbox-public` repo) is the worked example: `KimodoSequencePlayer`

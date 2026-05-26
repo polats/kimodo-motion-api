@@ -76,6 +76,7 @@ for (const [dirv, color] of [[[1, 0, 0], 0xe05555], [[0, 0, 1], 0x5a9bff]]) {
 
 // --- Character + animator (smplx neutral) ---------------------------------
 let animator = null, charRoot = null   // charRoot is yawed live for the rotation control
+let charSkinned = null                 // the skinned mesh whose skeleton the animator drives (clothing binds to it)
 let currentMotion = null               // last clip set on the animator (re-applied after a model swap)
 let currentCharId = 'unirig_citizen'   // default model (the UniRig-rigged sbox citizen)
 const gltfLoader = new GLTFLoader()
@@ -105,9 +106,10 @@ function unifySkeletons(root) {
 }
 async function loadCharacter(cfg) {
   if (charRoot) {   // swap: drop the previous mesh first
+    detachClothing()   // its bones are about to be disposed
     scene.remove(charRoot)
     charRoot.traverse(o => { o.geometry?.dispose?.(); if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose?.()) })
-    charRoot = null; animator = null
+    charRoot = null; animator = null; charSkinned = null
   }
   const root = await loadCharacterRoot(cfg.url)
   root.scale.setScalar(cfg.scale ?? 1.0)
@@ -127,6 +129,7 @@ async function loadCharacter(cfg) {
   }
   const strideScale = (box.max.y - box.min.y) / SMPLX_HEIGHT
   const target = (cfg.skinned && skinned) ? skinned : root
+  charSkinned = target.isSkinnedMesh ? target : null   // clothing binds its bones to this skeleton
   animator = new Animator(target, {
     mapping: cfg.mapping, blends: cfg.blends || {}, scale: strideScale, groundOffsetY,
     alignMode: target.isSkinnedMesh ? 'rest' : 'none',
@@ -142,6 +145,8 @@ async function loadCharacter(cfg) {
     if (mainBone && mainBone !== tb) animator.twistPairs.push({ twist: tb, main: mainBone })
   }
   if (currentMotion) { animator.setMotion(currentMotion, { loop: true }); setScrubRange(currentMotion) }   // keep playing after a model swap
+  await applyClothingForCurrentBody()   // re-dress with the new body's variant (if anything is worn)
+  renderClothingDrawer()                // refresh availability for the new model
 }
 // Copy each main bone's world rotation onto its twist bone (in the twist's parent
 // space) — needed for citizen rigs whose twist bones aren't under the main bone.
@@ -157,6 +162,51 @@ function syncTwistBones() {
       twist.quaternion.copy(_twPQ.invert().multiply(_twQ))
     } else twist.quaternion.copy(_twQ)
   }
+}
+
+// --- Clothing -------------------------------------------------------------
+// A garment GLB is skinned to the citizen's bone_N skeleton (decompiled from
+// s&box .vmdl_c, re-rigged via the REF rig — see web/scripts/clothing_rig.py).
+// It has its own copy of that skeleton; each frame we copy the citizen's driven
+// bone transforms onto the garment's matching bones (by name), so it deforms
+// with the body. Each garment is rigged to a specific body (matching bone_N).
+// Per garment: one rigged GLB per citizen body (each skinned to that body's
+// bone_N). The garment is body-agnostic in the UI ("worn"); we resolve the GLB
+// for whichever citizen is currently loaded — so it applies to all three, and
+// follows the body when you swap models.
+const CLOTHING = [
+  { id: 'jacket', label: 'Windbreaker (jacket)', color: 0x7a8a3a, glb: {
+    unirig_citizen: '/clothing/jacket_sausage.glb',
+    unirig_citizen_male: '/clothing/jacket_male.glb',
+    unirig_citizen_female: '/clothing/jacket_female.glb',
+  } },
+]
+const clothingUrlFor = (item, charId) => item.glb?.[charId] || null
+let clothingScene = null, clothingPairs = null, clothingWornId = null
+function detachClothing() {
+  if (clothingScene && charRoot) charRoot.remove(clothingScene)
+  if (clothingScene) clothingScene.traverse(o => { if (o.isMesh) { o.geometry?.dispose?.(); } })
+  clothingScene = null; clothingPairs = null   // keep clothingWornId so it re-attaches after a model swap
+}
+// Attach the worn garment's variant for the CURRENT body (no model swap).
+async function applyClothingForCurrentBody() {
+  detachClothing()
+  if (!clothingWornId || !charSkinned) return
+  const item = CLOTHING.find(c => c.id === clothingWornId); if (!item) return
+  const url = clothingUrlFor(item, currentCharId)
+  if (!url) return   // this garment isn't rigged for the current body (e.g. SMPL-X)
+  const sc = (await gltfLoader.loadAsync(url)).scene
+  let mesh = null; sc.traverse(o => { if (o.isSkinnedMesh) { mesh = o; o.frustumCulled = false } })
+  if (!mesh) { setStatus('clothing has no skinned mesh'); return }
+  if (item.color != null) mesh.material = new THREE.MeshStandardMaterial({ color: item.color, roughness: 0.85, metalness: 0.0 })
+  const cit = new Map(charSkinned.skeleton.bones.map(b => [b.name, b]))
+  clothingPairs = mesh.skeleton.bones.map(jb => ({ j: jb, c: cit.get(jb.name) })).filter(p => p.c)
+  charRoot.add(sc); clothingScene = sc
+}
+const _clP = new THREE.Vector3()
+function syncClothing() {   // drive the garment's skeleton from the citizen's (idempotent per frame)
+  if (!clothingPairs) return
+  for (const { j, c } of clothingPairs) { j.quaternion.copy(c.quaternion); j.position.copy(c.position); j.scale.copy(c.scale) }
 }
 
 // --- API ------------------------------------------------------------------
@@ -772,20 +822,23 @@ function renderDrawer() {
 }
 const drawer = document.getElementById('actions-drawer')
 const modelDrawer = document.getElementById('model-drawer')
+const clothingDrawer = document.getElementById('clothing-drawer')
 const leftTabs = document.getElementById('left-tabs')
 const drawerToggleBtn = document.getElementById('drawer-toggle')
 const modelToggleBtn = document.getElementById('model-toggle')
+const clothingToggleBtn = document.getElementById('clothing-toggle')
 const DRAWER_W = 330
 // Tabs stay docked to the right edge of whichever drawer is open (so you can tab
 // between them with one open), and highlight the active one.
 function syncTabs() {
-  const aOpen = drawer.classList.contains('open'), mOpen = modelDrawer.classList.contains('open')
-  leftTabs.style.left = (aOpen || mOpen) ? DRAWER_W + 'px' : '0'
+  const aOpen = drawer.classList.contains('open'), mOpen = modelDrawer.classList.contains('open'), cOpen = clothingDrawer.classList.contains('open')
+  leftTabs.style.left = (aOpen || mOpen || cOpen) ? DRAWER_W + 'px' : '0'
   drawerToggleBtn.classList.toggle('active', aOpen)
   modelToggleBtn.classList.toggle('active', mOpen)
+  clothingToggleBtn.classList.toggle('active', cOpen)
 }
 function openDrawer(on) {
-  if (on) modelDrawer.classList.remove('open')   // one drawer at a time
+  if (on) { modelDrawer.classList.remove('open'); clothingDrawer.classList.remove('open') }   // one drawer at a time
   drawer.classList.toggle('open', on)
   syncTabs()
   if (on) loadActionClips().then(renderDrawer)
@@ -809,7 +862,7 @@ async function loadRegistryModels() {
   registryLoaded = true
 }
 function openModel(on) {
-  if (on) drawer.classList.remove('open')
+  if (on) { drawer.classList.remove('open'); clothingDrawer.classList.remove('open') }
   modelDrawer.classList.toggle('open', on)
   syncTabs()
   if (on) loadRegistryModels().then(renderModelDrawer)
@@ -834,12 +887,45 @@ function renderModelDrawer() {
   }
 }
 modelToggleBtn.onclick = () => openModel(!modelDrawer.classList.contains('open'))
+
+// --- Clothing drawer ------------------------------------------------------
+function openClothing(on) {
+  if (on) { drawer.classList.remove('open'); modelDrawer.classList.remove('open') }
+  clothingDrawer.classList.toggle('open', on)
+  syncTabs()
+  if (on) renderClothingDrawer()
+}
+async function toggleClothing(item) {
+  if (clothingWornId === item.id) { clothingWornId = null; detachClothing(); renderClothingDrawer(); setStatus('clothing: off'); return }
+  if (!clothingUrlFor(item, currentCharId)) { setStatus(`${item.label} isn't available for this model`); return }
+  clothingWornId = item.id
+  setStatus(`loading ${item.label}…`)
+  try { await applyClothingForCurrentBody(); setStatus(`clothing: ${item.label}`) }
+  catch (e) { setStatus('clothing load failed: ' + e.message); clothingWornId = null }
+  renderClothingDrawer()
+}
+function renderClothingDrawer() {
+  const box = document.getElementById('clothing-list'); if (!box) return
+  box.innerHTML = ''
+  for (const c of CLOTHING) {
+    const avail = !!clothingUrlFor(c, currentCharId)
+    const b = document.createElement('button')
+    b.className = 'model-opt' + (c.id === clothingWornId ? ' on' : '')
+    b.textContent = (c.id === clothingWornId ? '✓ ' : '') + c.label + (avail ? '' : ' — n/a for this model')
+    b.disabled = !avail && c.id !== clothingWornId
+    b.style.opacity = avail ? '1' : '0.5'
+    b.onclick = () => toggleClothing(c)
+    box.appendChild(b)
+  }
+}
+clothingToggleBtn.onclick = () => openClothing(!clothingDrawer.classList.contains('open'))
+
 // Click outside an open drawer to dismiss it — but NOT on the tabs, and NOT on
 // the 3D viewport (so orbiting the camera doesn't close the drawer).
 document.addEventListener('pointerdown', (e) => {
-  if (!drawer.classList.contains('open') && !modelDrawer.classList.contains('open')) return
-  if (drawer.contains(e.target) || modelDrawer.contains(e.target) || leftTabs.contains(e.target) || app.contains(e.target)) return
-  drawer.classList.remove('open'); modelDrawer.classList.remove('open')
+  if (!drawer.classList.contains('open') && !modelDrawer.classList.contains('open') && !clothingDrawer.classList.contains('open')) return
+  if (drawer.contains(e.target) || modelDrawer.contains(e.target) || clothingDrawer.contains(e.target) || leftTabs.contains(e.target) || app.contains(e.target)) return
+  drawer.classList.remove('open'); modelDrawer.classList.remove('open'); clothingDrawer.classList.remove('open')
   syncTabs(); aScrub = aLabel = aPlayBtn = null
 })
 
@@ -847,6 +933,7 @@ document.addEventListener('pointerdown', (e) => {
 function tick() {
   animator?.update()
   syncTwistBones()
+  syncClothing()
   // The move whose segment is playing: highlight + pulse it, and run a playhead
   // down its timeline bar tracking the exact frame on screen.
   let shown = false

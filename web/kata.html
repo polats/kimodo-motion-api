@@ -59,12 +59,12 @@
     }
     .left-tab:hover { background: rgba(62,62,70,0.95); }
     .left-tab.active { background: #2d4a35; border-color: #3a6; color: #9fd; }
-    #actions-drawer, #model-drawer {
+    #actions-drawer, #model-drawer, #clothing-drawer {
       position: fixed; top: 0; left: 0; width: 330px; height: 100%; z-index: 30;
       background: rgba(20,20,24,0.97); backdrop-filter: blur(6px); border-right: 1px solid #3a3a40;
       padding: 12px; overflow-y: auto; transform: translateX(-100%); transition: transform .22s ease;
     }
-    #actions-drawer.open, #model-drawer.open { transform: translateX(0); }
+    #actions-drawer.open, #model-drawer.open, #clothing-drawer.open { transform: translateX(0); }
     .model-opt { display: block; width: 100%; text-align: left; margin-bottom: 6px; padding: 9px 11px; font-size: 13px; cursor: pointer; border-radius: 7px; background: #26262b; color: #e3e3e8; border: 1px solid #3a3a40; }
     .model-opt:hover { background: #30303a; }
     .model-opt.on { background: #2d4a35; border-color: #3a6; color: #9fd; }
@@ -136,11 +136,17 @@
   <div id="left-tabs">
     <button id="drawer-toggle" class="left-tab" title="Open the actions library">ACTIONS</button>
     <button id="model-toggle" class="left-tab" title="Choose the character model">MODEL</button>
+    <button id="clothing-toggle" class="left-tab" title="Add clothing to the sbox citizen">CLOTHING</button>
   </div>
   <div id="model-drawer">
     <h2 style="font-size:14px;margin:0 0 6px">Model</h2>
     <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.4">The kimodo animation retargets onto any of these rigs. Pick one to swap the character — what's playing carries over.</div>
     <div id="model-list"></div>
+  </div>
+  <div id="clothing-drawer">
+    <h2 style="font-size:14px;margin:0 0 6px">Clothing</h2>
+    <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.4">s&box garments, decompiled and re-skinned onto the citizen rig. Toggle one on — it shares the skeleton, so it animates with the body. Selecting one loads the matching citizen body.</div>
+    <div id="clothing-list"></div>
   </div>
   <div id="actions-drawer">
     <h2 style="font-size:14px;margin:0 0 6px">Actions library</h2>
