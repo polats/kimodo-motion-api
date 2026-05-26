@@ -23,7 +23,12 @@ MANIFEST_DIR = KIMODO / ".kimodo-clothing"
 RIG = KIMODO / "web" / "scripts" / "clothing_rig.py"
 TMP = Path("/tmp/clothing_add"); TMP.mkdir(exist_ok=True)
 
-VRF = os.environ.get("KIMODO_VRF", "/tmp/vrf/cli/Source2Viewer-CLI")
+def _find_vrf():
+    if os.environ.get("KIMODO_VRF"): return os.environ["KIMODO_VRF"]
+    for c in (Path.home() / ".local/share/source2viewer/Source2Viewer-CLI", "/tmp/vrf/cli/Source2Viewer-CLI"):
+        if Path(c).exists(): return str(c)
+    return str(Path.home() / ".local/share/source2viewer/Source2Viewer-CLI")
+VRF = _find_vrf()
 INSTALL = Path("/home/paul/.local/share/Steam/steamapps/common/sbox/addons/citizen/Assets/models")
 REF = {
     "sausage": INSTALL / "citizen/citizen_REF.fbx",

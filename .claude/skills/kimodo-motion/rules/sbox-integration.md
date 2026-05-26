@@ -249,10 +249,11 @@ python3 web/scripts/clothing_add.py \
 - **Manifest** `.kimodo-clothing/<id>.json`: `{ id, label, category, slot, layer,
   slotsUnder, slotsOver, hideBody, glb: { unirig_citizen, unirig_citizen_male,
   unirig_citizen_female } }`.
-- **Prereqs:** the **VRF CLI** (`Source2Viewer-CLI`) — defaults to `/tmp/vrf/cli`
-  (ephemeral!); set `KIMODO_VRF` to a stable copy, or re-download `cli-linux-x64.zip`
-  from the ValveResourceFormat releases. Plus Blender, the `demo`/motion API + vite, and
-  the UniRig body GLBs in `web/public/models/`.
+- **Prereqs:** the **VRF CLI** (`Source2Viewer-CLI`) — kept at
+  `~/.local/share/source2viewer/` (the tool also falls back to `/tmp/vrf/cli`, or set
+  `KIMODO_VRF`). If missing, download `cli-linux-x64.zip` from the ValveResourceFormat
+  releases and unzip it there (the binary + its `.so` files). Plus Blender, the
+  `demo`/motion API + vite, and the UniRig body GLBs in `web/public/models/`.
 
 ### Viewer wiring (`web/src/kata.js`, `kata.html`)
 
