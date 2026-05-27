@@ -72,6 +72,8 @@
     .action-card .nm { font-size: 13px; font-weight: 600; color: #e3e3e8; padding-right: 18px; }
     .action-card .dur-badge { font-size: 10px; font-weight: 500; color: #9aa; background: #2f2f37; border-radius: 4px; padding: 1px 5px; margin-left: 4px; }
     .action-card .dur-tog { width: 100%; margin-top: 6px; padding: 4px; font-size: 11px; text-align: left; cursor: pointer; background: none; border: none; color: #9aa; }
+    .action-card .kata-plus { margin-top: 6px; padding: 4px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; border-radius: 5px; background: #2d4a35; color: #9fd; border: 1px solid #3a6; }
+    .action-card .kata-plus:disabled { opacity: 0.4; cursor: default; }
     .action-card .dur-tog:hover { color: #cde; }
     .action-card .del-x { position: absolute; top: 5px; right: 7px; background: none; border: none; color: #888; font-size: 13px; line-height: 1; cursor: pointer; padding: 2px; }
     .action-card .del-x:hover:not(:disabled) { color: #e88; }
@@ -159,13 +161,20 @@
     <div style="margin:8px 0">
       <label style="font-size:12px;color:#aaa;margin-right:6px">Kata</label>
       <select id="kata-select" style="background:#26262b;color:#e3e3e8;border:1px solid #4a4a52;border-radius:5px;padding:5px 8px;font-size:13px;min-width:220px"></select>
+      <button id="kata-edit" title="rename this kata" style="margin-left:6px;background:#26262b;color:#cfcfd6;border:1px solid #4a4a52;border-radius:5px;padding:5px 8px;font-size:13px;cursor:pointer">✎</button>
     </div>
     <div class="bar" style="gap:8px;align-items:center">
-      <button id="play-pause" title="play / pause" style="padding:4px 9px;font-size:13px;min-width:36px">▶</button>
-      <input type="range" id="frame-scrub" min="0" max="1" value="0" step="1" style="flex:1;cursor:pointer" />
-      <span id="frame-label" style="font-size:11px;color:#aaa;min-width:62px;text-align:right">—</span>
+      <button id="play-pause" title="play / pause" style="padding:2px 0;font-size:11px;width:22px;min-width:22px;flex:0 0 auto">▶</button>
+      <input type="range" id="frame-scrub" min="0" max="1" value="0" step="1" style="flex:1 1 auto;cursor:pointer;min-width:0" />
+      <button id="kata-add-btn" title="add a move from the current frame" style="padding:2px 0;font-size:12px;width:22px;min-width:22px;flex:0 0 auto;cursor:pointer;background:#2d4a35;color:#9fd;border:1px solid #3a6;border-radius:5px">＋</button>
+      <button id="kata-regen-btn" title="edit / regenerate the selected move" style="padding:2px 0;font-size:12px;width:22px;min-width:22px;flex:0 0 auto;cursor:pointer;background:#28406a;color:#bcd6ff;border:1px solid #46c;border-radius:5px">✎</button>
+      <button id="kata-del-btn" title="delete the selected move" style="padding:2px 0;font-size:12px;width:22px;min-width:22px;flex:0 0 auto;cursor:pointer;background:#5a2330;color:#f6a;border:1px solid #a44;border-radius:5px">✕</button>
     </div>
-    <div id="status">loading…</div>
+    <div id="kata-add"></div>
+    <div style="display:flex;align-items:baseline;gap:10px">
+      <div id="status" style="flex:1">loading…</div>
+      <span id="frame-label" style="font-size:11px;color:#aaa;white-space:nowrap">—</span>
+    </div>
     <svg id="tree-svg"></svg>
     <div style="font-size:11px;color:#777;margin-top:6px">scroll = zoom · drag = pan · click once = play path · click again = view move · pulsing ● = playing now</div>
   </div>

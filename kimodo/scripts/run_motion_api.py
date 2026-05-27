@@ -560,7 +560,10 @@ def build_app() -> FastAPI:
             P = np.asarray(r["posed_joints"], dtype=np.float32)
 
             if idx > 0:
-                beta = alpha - _pose_heading(P[0])         # yaw to align this clip's start to the running heading
+                # align this clip's start to the running heading, then add any baked yaw
+                # (heading_offset) back as a deliberate turn so a baked rotation shows in
+                # the stitched kata and carries forward instead of being normalized away.
+                beta = alpha - _pose_heading(P[0]) + math.radians(float(r.get("heading_offset", 0) or 0))
                 c, s = math.cos(beta), math.sin(beta)
                 px, pz = float(R[0, 0]), float(R[0, 2])    # pivot = this clip's frame-0 root (XZ)
                 # rotate XZ about the pivot, then translate the pivot to (Tx, Tz).
@@ -644,7 +647,14 @@ def build_app() -> FastAPI:
         # the root's local quat == its global; keep them consistent (wxyz)
         L[:, 0, 0], L[:, 0, 1], L[:, 0, 2], L[:, 0, 3] = G[:, 0, 3], G[:, 0, 0], G[:, 0, 1], G[:, 0, 2]
         arr = {"local_quats_wxyz": L, "global_quats_xyzw": G, "root_positions": R, "posed_joints": P}
-        return _save_arrays(rec.get("prompt", req.id), float(L.shape[0]) / fps, arr, None)
+        # Record the cumulative baked yaw so path stitching can honor it: stitch normally
+        # re-aligns each move's heading to flow from the previous one (which would cancel a
+        # constant yaw), so it adds this offset back as a deliberate turn that carries
+        # forward. Also preserve continues_from so the move keeps its place in the tree.
+        extra = {"heading_offset": float(rec.get("heading_offset", 0) or 0) + float(req.degrees)}
+        if rec.get("continues_from"):
+            extra["continues_from"] = rec["continues_from"]
+        return _save_arrays(rec.get("prompt", req.id), float(L.shape[0]) / fps, arr, None, extra=extra)
 
     @app.get("/animations")
     def list_animations() -> dict:

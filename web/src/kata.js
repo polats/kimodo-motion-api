@@ -292,6 +292,19 @@ let svg, gAll, gLink, gNode, gBar, gPlay, playLine, playHead, zoomBehavior, POS 
 // branched from — so the end-frame continuation sits at the bar's bottom (an
 // unbroken vertical spine) and an earlier branch splits off sideways partway up.
 const SCALE_Y = 1.35, COL_GAP = 185, TOP = 40
+const SPINE_END_SLOP = 4   // a continuation stays on the spine only if it branches within this
+                           // many frames of the parent's END; continuing from any earlier frame
+                           // forks off sideways (even as an only child)
+
+// Katas the user started from a library action (a standalone clip with no
+// continuation isn't otherwise a tree root) + their custom display names. Both
+// viewer-only, persisted in localStorage.
+const KATA_ROOTS_KEY = 'kata-roots-v1', KATA_NAMES_KEY = 'kata-names-v1'
+const _load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d } catch { return d } }
+const kataRoots = new Set(_load(KATA_ROOTS_KEY, []))
+const kataNames = _load(KATA_NAMES_KEY, {})
+const saveKataRoots = () => localStorage.setItem(KATA_ROOTS_KEY, JSON.stringify([...kataRoots]))
+const saveKataNames = () => localStorage.setItem(KATA_NAMES_KEY, JSON.stringify(kataNames))
 
 function buildTree(anims) {
   const byId = new Map(anims.map(a => [a.id, a]))
@@ -306,6 +319,8 @@ function buildTree(anims) {
     }
   }
   const roots = [...inTree].filter(id => !parentOf.has(id))
+  // promoted single-move katas: a standalone action clip the user turned into a kata
+  for (const id of kataRoots) if (byId.has(id) && !parentOf.has(id) && !roots.includes(id)) roots.push(id)
   return { byId, childrenOf, parentOf, roots }
 }
 
@@ -318,8 +333,14 @@ function pathToRoot(id) {
 const numFrames = (id) => Number(CTX.byId.get(id)?.num_frames) || 60
 const branchFrameOf = (id) => { const f = CTX.byId.get(id)?.continues_from?.frame; return f == null ? 0 : Number(f) }
 const childrenSorted = (id) => (CTX.childrenOf.get(id) || []).slice().sort((a, b) => branchFrameOf(a) - branchFrameOf(b))
-// the continuation that carries the spine = the child taken from the latest frame
-const spineChild = (id) => { const ch = CTX.childrenOf.get(id) || []; return ch.length ? ch.reduce((m, c) => branchFrameOf(c) > branchFrameOf(m) ? c : m, ch[0]) : null }
+// The spine continues straight down ONLY through a child that branches at (near) the
+// parent's LAST frame — i.e. a move added at the end. A move continuing from any earlier
+// frame forks off sideways, even if it's the only child (so mid-move adds always branch).
+const spineChild = (id) => {
+  const ch = CTX.childrenOf.get(id) || [], endFrom = numFrames(id) - 1 - SPINE_END_SLOP
+  const enders = ch.filter(c => branchFrameOf(c) >= endFrom)
+  return enders.length ? enders.reduce((m, c) => branchFrameOf(c) > branchFrameOf(m) ? c : m, enders[0]) : null
+}
 function descendantsOf(id) {
   const out = new Set(), stack = [id]
   while (stack.length) { const x = stack.pop(); if (out.has(x)) continue; out.add(x); for (const c of (CTX.childrenOf.get(x) || [])) stack.push(c) }
@@ -360,6 +381,8 @@ function computeLayout() {
     POS.set(id, { x: col * COL_GAP, y: yStart, nf: numFrames(id) })
     const sp = spineChild(id)
     for (const c of childrenSorted(id)) {
+      // both spine and branch attach at the child's real branch frame down the parent's
+      // bar; the spine stays in this column, a branch forks into a fresh column.
       const cy = yStart + branchFrameOf(c) * SCALE_Y
       if (c === sp) place(c, col, cy)
       else { nextCol += 1; place(c, nextCol, cy) }
@@ -499,11 +522,37 @@ async function select(id) {
 
 // --- Kata selector (one root tree at a time) ------------------------------
 const kataSel = document.getElementById('kata-select')
-const kataLabel = (rootId) => {
-  const p = (CTX.byId.get(rootId)?.prompt || rootId)
-    .replace(/^(a martial artist|a person|the practitioner|the martial artist)\s+/i, '')
-  return `${p.slice(0, 44)}  (${descendantsOf(rootId).size} moves)`
+const kataEditBtn = document.getElementById('kata-edit')
+const kataDerivedName = (rootId) => (CTX.byId.get(rootId)?.prompt || rootId)
+  .replace(/^(a martial artist|a person|the practitioner|the martial artist)\s+/i, '').slice(0, 44)
+const kataLabel = (rootId) =>
+  `${kataNames[rootId] || kataDerivedName(rootId)}  (${descendantsOf(rootId).size} moves)`
+// Rename the current kata inline (✎, like the action-prompt editor): swap the
+// dropdown for a text field; Enter/blur saves a custom name, Esc cancels.
+function startKataRename() {
+  if (!currentRoot || kataSel.style.display === 'none') return
+  const input = document.createElement('input')
+  input.className = 'kata-rename'
+  input.value = kataNames[currentRoot] || kataDerivedName(currentRoot)
+  input.style.cssText = kataSel.style.cssText
+  kataSel.style.display = 'none'; kataEditBtn.style.display = 'none'
+  kataSel.parentNode.insertBefore(input, kataSel)
+  input.focus(); input.select()
+  let done = false
+  const finish = (save) => {
+    if (done) return; done = true
+    if (save) {
+      const v = input.value.trim()
+      if (v && v !== kataDerivedName(currentRoot)) kataNames[currentRoot] = v
+      else delete kataNames[currentRoot]
+      saveKataNames(); populateKataSelect()
+    }
+    input.remove(); kataSel.style.display = ''; kataEditBtn.style.display = ''
+  }
+  input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); finish(true) } else if (e.key === 'Escape') finish(false) }
+  input.onblur = () => finish(true)
 }
+if (kataEditBtn) kataEditBtn.onclick = startKataRename
 function populateKataSelect() {
   kataSel.innerHTML = ''
   for (const r of CTX.roots) {
@@ -559,6 +608,194 @@ playBtn.onclick = () => setPlaying(!(animator && animator.playing))
 // Scrubbing pauses playback and stays paused — press ▶ to resume.
 scrub.oninput = () => { scrubbing = true; const f = Number(scrub.value); seekTo(f); frameLabel.textContent = `${f}/${curFrames - 1}`; updatePlayBtn() }
 scrub.onchange = () => { scrubbing = false; updatePlayBtn() }
+
+// --- Kata edit panel: add-from-frame (green) / regenerate (blue) / delete ----
+// "+" continues the move under the playhead from the CURRENT frame (end of line →
+// extends the spine, mid-move → branches). "↻" regenerates the SELECTED move (its
+// prompt + duration prefilled). "✕" deletes the selected move (with confirm).
+let kataAddSeconds = 2.2, kataRegenSeconds = 2.2, kataPanelBusy = false
+let kataPanelMode = null   // null | 'add' | 'regen'
+const kataAddBtn = document.getElementById('kata-add-btn')
+const kataRegenBtn = document.getElementById('kata-regen-btn')
+const kataDelBtn = document.getElementById('kata-del-btn')
+const kataAddBox = document.getElementById('kata-add')
+function currentSeg() {   // map the playhead's global frame -> (source clip id, local frame)
+  if (!playSegs || !playSegs.length || !animator) return null
+  const f = animator.frame
+  const seg = playSegs.find(s => f >= s.start && f < s.end) || playSegs[playSegs.length - 1]
+  return { id: seg.id, frame: Math.round(seg.lo + (Math.min(f, seg.end - 1) - seg.start)) }
+}
+const nodeSeconds = (id) => {
+  const rec = CTX.byId.get(id), nf = Number(rec?.num_frames) || 0, fps = Number(rec?.fps) || curFps || 30
+  return nf ? Math.max(0.5, Math.min(5, Math.round(nf / fps * 10) / 10)) : kataAddSeconds
+}
+async function addMoveFromFrame(promptText) {
+  const seg = currentSeg(), prompt = (promptText || '').trim()
+  if (!seg) { setStatus('select / play a move first, then add from a frame'); return }
+  if (!prompt || kataPanelBusy) return
+  kataPanelBusy = true; renderKataPanel()
+  setStatus(`adding a move from frame ${seg.frame} of ${shortLabel(CTX.byId.get(seg.id)?.prompt)}…`)
+  try {
+    const r = await fetch(`${KIMODO_URL}/generate_continue`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_id: seg.id, source_frame: seg.frame, prompt, seconds: kataAddSeconds, stitch: false }),
+    })
+    if (!r.ok) throw new Error(`generate_continue ${r.status}`)
+    const newId = (await r.json()).id
+    kataPanelBusy = false; kataPanelMode = null; kataAddBox.innerHTML = ''
+    await refreshTree()
+    mode = 'path'; await select(newId)   // play the path through the freshly-added move
+    // park the playhead at the END so the next "add from current frame" extends the kata
+    const last = Math.max(0, curFrames - 1)
+    seekTo(last); scrub.value = last; frameLabel.textContent = `${last}/${last}`; updatePlayBtn()
+  } catch (e) { kataPanelBusy = false; renderKataPanel(); setStatus('add failed: ' + e.message) }
+}
+// Regenerate the selected move: a fresh take from the SAME parent+frame (or a fresh
+// root). When the move is a leaf, the old take is removed (true replace); a move with
+// follow-ups is kept and the new take is an alternative branch (so we never orphan).
+async function regenerateNode(promptText, seconds) {
+  const id = selectedId
+  if (!id || !CTX.byId.has(id)) { setStatus('select a move to regenerate'); return }
+  const prompt = (promptText || '').trim(); if (!prompt || kataPanelBusy) return
+  const cf = CTX.byId.get(id).continues_from || {}
+  kataPanelBusy = true; renderKataPanel()
+  setStatus(`regenerating “${shortLabel(CTX.byId.get(id).prompt)}”…`)
+  try {
+    const cont = cf.source_id && CTX.byId.has(cf.source_id)
+    const url = cont ? `${KIMODO_URL}/generate_continue` : `${KIMODO_URL}/generate`
+    const body = cont ? { source_id: cf.source_id, source_frame: cf.frame ?? -1, prompt, seconds, stitch: false } : { prompt, seconds }
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (!r.ok) throw new Error(`${cont ? 'generate_continue' : 'generate'} ${r.status}`)
+    const newId = (await r.json()).id
+    const hadKids = (CTX.childrenOf.get(id) || []).length > 0
+    if (!hadKids) {   // safe to replace in place
+      try { await fetch(`${KIMODO_URL}/animations/${encodeURIComponent(id)}`, { method: 'DELETE' }) } catch {}
+      if (kataRoots.has(id)) { kataRoots.delete(id); if (!cont) kataRoots.add(newId); saveKataRoots() }
+    }
+    if (currentRoot === id && !cont) currentRoot = newId
+    kataPanelBusy = false
+    await refreshTree()
+    mode = 'path'; await select(CTX.byId.has(newId) ? newId : currentRoot)
+    // keep the regenerate card open on the new take so you can keep regenerating until happy
+    renderKataPanel()
+    setStatus(hadKids ? 'regenerated as an alternative take (original kept — it has follow-ups)' : `regenerated “${shortLabel(prompt)}” — regenerate again or close`)
+  } catch (e) { kataPanelBusy = false; renderKataPanel(); setStatus('regenerate failed: ' + e.message) }
+}
+// Bake the live yaw into the selected move's clip (server preserves its tree position).
+// Like regenerate: a leaf is replaced in place; a move with follow-ups keeps the original.
+async function saveKataRotation(deg) {
+  const id = selectedId
+  if (!id || !CTX.byId.has(id) || !deg || kataPanelBusy) return
+  const cf = CTX.byId.get(id).continues_from || {}
+  kataPanelBusy = true; renderKataPanel()
+  setStatus(`baking ${deg}° into “${shortLabel(CTX.byId.get(id).prompt)}”…`)
+  try {
+    const r = await fetch(`${KIMODO_URL}/rotate_clip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, degrees: deg }) })
+    if (!r.ok) throw new Error(`rotate_clip ${r.status}`)
+    const newId = (await r.json()).id
+    const hadKids = (CTX.childrenOf.get(id) || []).length > 0
+    if (!hadKids) {
+      try { await fetch(`${KIMODO_URL}/animations/${encodeURIComponent(id)}`, { method: 'DELETE' }) } catch {}
+      if (kataRoots.has(id)) { kataRoots.delete(id); if (!cf.source_id) kataRoots.add(newId); saveKataRoots() }
+    }
+    if (currentRoot === id && !cf.source_id) currentRoot = newId
+    if (charRoot) charRoot.rotation.y = 0
+    kataPanelBusy = false
+    await refreshTree()
+    mode = 'path'; await select(CTX.byId.has(newId) ? newId : currentRoot)
+    renderKataPanel()
+    setStatus(hadKids ? `baked ${deg}° as an alternative take (original kept — it has follow-ups)` : `✓ baked ${deg}° into the move`)
+  } catch (e) { kataPanelBusy = false; renderKataPanel(); setStatus('rotate failed: ' + e.message) }
+}
+async function deleteSelectedNode() {
+  const id = selectedId
+  if (!id || !CTX.byId.has(id)) { setStatus('select a move to delete'); return }
+  const sub = descendantsOf(id), label = shortLabel(CTX.byId.get(id).prompt)
+  const followups = sub.size - 1
+  const msg = followups
+    ? `Delete “${label}” and its ${followups} follow-up move${followups > 1 ? 's' : ''}? This can't be undone.`
+    : `Delete the move “${label}”? This can't be undone.`
+  if (!window.confirm(msg)) return
+  const parent = CTX.parentOf.get(id)
+  kataPanelBusy = true; renderKataPanel(); setStatus(`deleting ${sub.size} move${sub.size > 1 ? 's' : ''}…`)
+  try {
+    for (const d of sub) { try { await fetch(`${KIMODO_URL}/animations/${encodeURIComponent(d)}`, { method: 'DELETE' }) } catch {} ; kataRoots.delete(d) }
+    saveKataRoots()
+    if (sub.has(currentRoot)) currentRoot = null
+    kataPanelBusy = false; selectedId = null; playSegs = null; pathSet = new Set()
+    await refreshTree()
+    if (parent && CTX.byId.has(parent)) { mode = 'path'; await select(parent) }
+    setStatus(`deleted “${label}”`)
+  } catch (e) { kataPanelBusy = false; renderKataPanel(); setStatus('delete failed: ' + e.message) }
+}
+function renderKataPanel() {
+  kataAddBtn.textContent = kataPanelMode === 'add' ? '×' : '＋'
+  kataRegenBtn.textContent = kataPanelMode === 'regen' ? '×' : '✎'
+  kataAddBox.innerHTML = ''
+  if (!kataPanelMode) return
+  const card = document.createElement('div'); card.className = 'add-form'; card.style.marginTop = '6px'
+  const hint = document.createElement('div'); hint.style.cssText = 'font-size:11px;color:#aab;margin-bottom:6px;line-height:1.4'
+  const ta = document.createElement('textarea'); ta.className = 'add-input'; ta.rows = 2
+  const row = document.createElement('div'); row.className = 'add-row'
+  const btn = document.createElement('button'); btn.className = 'add-action'; row.appendChild(btn)
+  const dur = document.createElement('div'); dur.className = 'dur'
+  const dtag = document.createElement('span'); dtag.className = 'dur-tag'; dtag.textContent = '⏱'
+  const range = document.createElement('input'); range.type = 'range'; range.min = '0.5'; range.max = '5'; range.step = '0.1'
+  const lbl = document.createElement('span'); lbl.className = 'dur-lbl'
+  dur.appendChild(dtag); dur.appendChild(range); dur.appendChild(lbl)
+  let rotRow = null   // (regen only) yaw the character live + bake the rotation into the move
+
+  if (kataPanelMode === 'add') {
+    card.style.background = '#16271b'; card.style.borderColor = '#3a6'   // GREEN = add a new move
+    const seg = currentSeg(), ok = !!seg && !kataPanelBusy
+    hint.textContent = seg
+      ? `Continues from frame ${seg.frame} of “${shortLabel(CTX.byId.get(seg.id)?.prompt)}”. At the end of the line it extends the kata; mid-move it branches.`
+      : 'Click a move (and scrub to a frame) first, then add from here.'
+    ta.placeholder = 'describe the next move, e.g. “follows with a reverse punch”'; ta.disabled = !ok
+    btn.innerHTML = kataPanelBusy ? '<span class="spin">⟳</span> generating…' : '+ Add from current frame'; btn.disabled = !ok
+    const submit = () => addMoveFromFrame(ta.value)
+    btn.onclick = submit; ta.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() } }
+    range.value = String(kataAddSeconds); range.disabled = kataPanelBusy; lbl.textContent = `${kataAddSeconds.toFixed(1)}s`
+    range.oninput = () => { kataAddSeconds = Number(range.value); lbl.textContent = `${kataAddSeconds.toFixed(1)}s` }
+    if (ok) setTimeout(() => ta.focus(), 0)
+  } else {   // 'regen'
+    card.style.background = '#172238'; card.style.borderColor = '#46c'   // BLUE = regenerate this move
+    const node = (selectedId && CTX.byId.has(selectedId)) ? selectedId : null
+    const ok = !!node && !kataPanelBusy
+    const cf = node ? (CTX.byId.get(node).continues_from || {}) : {}
+    hint.textContent = node
+      ? `Regenerate “${shortLabel(CTX.byId.get(node).prompt)}” — a fresh take ${cf.source_id ? `continuing from frame ${cf.frame ?? '?'} of its parent` : 'as a root move'}.`
+      : 'Select a move to regenerate.'
+    ta.placeholder = 'prompt for this move'; ta.value = node ? CTX.byId.get(node).prompt : ''; ta.disabled = !ok
+    btn.style.cssText = 'flex:1;padding:7px;font-size:11.5px;cursor:pointer;border-radius:6px;background:#28406a;color:#bcd6ff;border:1px solid #46c'
+    btn.innerHTML = kataPanelBusy ? '<span class="spin">⟳</span> regenerating…' : '↻ regenerate this move'; btn.disabled = !ok
+    const submit = () => regenerateNode(ta.value, kataRegenSeconds)
+    btn.onclick = submit; ta.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() } }
+    range.value = String(kataRegenSeconds); range.disabled = kataPanelBusy; lbl.textContent = `${kataRegenSeconds.toFixed(1)}s`
+    range.oninput = () => { kataRegenSeconds = Number(range.value); lbl.textContent = `${kataRegenSeconds.toFixed(1)}s` }
+    // rotation: yaw the live character, then bake it into this move's clip
+    const curDeg = charRoot ? Math.round(charRoot.rotation.y * 180 / Math.PI) : 0
+    rotRow = document.createElement('div'); rotRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:7px'
+    const rtag = document.createElement('span'); rtag.className = 'dur-tag'; rtag.textContent = '⟲'
+    const rr = document.createElement('input'); rr.type = 'range'; rr.min = '-180'; rr.max = '180'; rr.step = '1'; rr.value = String(curDeg); rr.style.cssText = 'flex:1;cursor:pointer'; rr.disabled = !ok
+    rr.title = ok ? 'rotate the character to face a direction, then bake' : 'select a move first'
+    const rl = document.createElement('span'); rl.className = 'dur-lbl'; rl.textContent = `${curDeg}°`
+    const rsave = document.createElement('button'); rsave.textContent = 'bake'; rsave.disabled = curDeg === 0 || !ok
+    rsave.style.cssText = 'padding:3px 9px;font-size:11px;border-radius:5px;cursor:pointer;background:#28406a;color:#bcd6ff;border:1px solid #46c'
+    rr.oninput = () => { const d = Number(rr.value); rl.textContent = `${d}°`; if (charRoot) charRoot.rotation.y = d * Math.PI / 180; rsave.disabled = d === 0 || !ok }
+    rsave.onclick = () => saveKataRotation(Number(rr.value))
+    rotRow.appendChild(rtag); rotRow.appendChild(rr); rotRow.appendChild(rl); rotRow.appendChild(rsave)
+  }
+  card.appendChild(hint); card.appendChild(ta); card.appendChild(row); card.appendChild(dur)
+  if (rotRow) card.appendChild(rotRow)
+  kataAddBox.appendChild(card)
+}
+kataAddBtn.onclick = () => { kataPanelMode = kataPanelMode === 'add' ? null : 'add'; renderKataPanel() }
+kataRegenBtn.onclick = () => {
+  if (kataPanelMode === 'regen') { kataPanelMode = null } else { kataPanelMode = 'regen'; kataRegenSeconds = nodeSeconds(selectedId) }
+  renderKataPanel()
+}
+kataDelBtn.onclick = () => deleteSelectedNode()
 
 // --- Actions library drawer -----------------------------------------------
 // Reusable standalone moves (continues_from = none) matched to store clips by
@@ -697,6 +934,18 @@ async function saveRotation(act, deg) {
     setStatus(`✓ baked ${deg}° into “${act.name}”`)
   } catch (e) { busyPrompt = null; renderDrawer(); setStatus('rotate failed: ' + e.message) }
 }
+// Start a new kata with this action's clip as the first move: promote the clip to
+// a tree root and select it (the user then chains more moves onto it).
+async function makeKataFromAction(act) {
+  const clip = clipForAction(act)
+  if (!clip) { setStatus(`generate “${act.name}” first`); return }
+  kataRoots.add(clip.id); saveKataRoots()
+  currentRoot = clip.id
+  await refreshTree()                       // includes the new root + keeps currentRoot
+  selectedId = activeId = null; playSegs = null; pathSet = new Set()
+  buildGraph(); showKataStatus()
+  setStatus(`new kata from “${act.name}” — click the node to continue it`)
+}
 function renderDrawer() {
   const box = document.getElementById('actions-list'); if (!box) return
   box.innerHTML = ''
@@ -783,10 +1032,15 @@ function renderDrawer() {
 
       // collapsible "options": the two regenerate buttons + duration
       const open = durOpen.has(act.id)
-      const tog = document.createElement('button'); tog.className = 'dur-tog'
+      const optRow = document.createElement('div'); optRow.style.cssText = 'display:flex;gap:6px;align-items:center'
+      const tog = document.createElement('button'); tog.className = 'dur-tog'; tog.style.flex = '1'; tog.style.width = 'auto'
       tog.textContent = `${open ? '▾' : '▸'} options · ${secs.toFixed(1)}s`
       tog.onclick = () => { durOpen.has(act.id) ? durOpen.delete(act.id) : durOpen.add(act.id); renderDrawer() }
-      card.appendChild(tog)
+      // start a new kata with this move as its first step
+      const mk = document.createElement('button'); mk.className = 'kata-plus'; mk.textContent = '＋ kata'; mk.disabled = !has || busy
+      mk.title = has ? 'start a new kata with this move as the first step' : 'generate this action first'
+      mk.onclick = () => makeKataFromAction(act)
+      optRow.appendChild(tog); optRow.appendChild(mk); card.appendChild(optRow)
       if (open) {
         const rrow = document.createElement('div'); rrow.className = 'regen-row'
         const reg = document.createElement('button'); reg.className = 'rg'; reg.disabled = busy
