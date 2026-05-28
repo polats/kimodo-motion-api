@@ -118,6 +118,28 @@ class RotateClipRequest(BaseModel):
     degrees: float = 0.0
 
 
+class HitboxDef(BaseModel):
+    # An attack hitbox on a striking limb. jointA/jointB are SMPL-X joint names
+    # (== a clip's bone_names); jointB == jointA (or null) means a sphere, otherwise
+    # a capsule along the limb. start/end are the active-frame window (inclusive).
+    # reach (m) slides the anchor outward past jointA, away from its parent joint,
+    # toward the striking surface (wrist→fist, ankle→toe) — lets the fist be hit
+    # without a finger bone, staying in the 22-joint space so it bakes portably.
+    jointA: str
+    jointB: str | None = None
+    radius: float = 0.08
+    reach: float = 0.0
+    start: int = 0
+    end: int = 0
+    damage: float = 25.0
+    tags: list[str] = []
+
+
+class SetHitboxRequest(BaseModel):
+    id: str
+    hitboxes: list[HitboxDef] = []
+
+
 def _passthrough(iterable, *args, **kwargs):
     return iterable
 
@@ -655,6 +677,18 @@ def build_app() -> FastAPI:
         if rec.get("continues_from"):
             extra["continues_from"] = rec["continues_from"]
         return _save_arrays(rec.get("prompt", req.id), float(L.shape[0]) / fps, arr, None, extra=extra)
+
+    @app.post("/set_hitbox")
+    def set_hitbox(req: SetHitboxRequest) -> dict:
+        """Attach attack-hitbox metadata to a clip IN PLACE (same id, no new clip) so it
+        doesn't disturb the kata tree. The viewer authors/visualizes it; the baker can
+        later emit it as a sidecar for in-engine hit detection."""
+        rec = store.get(req.id)
+        if rec is None:
+            raise HTTPException(404, f"clip '{req.id}' not found")
+        rec["hitboxes"] = [h.model_dump() for h in req.hitboxes]
+        store.save(rec)   # LocalFsStore keeps the existing id → overwrites in place
+        return {"id": req.id, "hitboxes": rec["hitboxes"]}
 
     @app.get("/animations")
     def list_animations() -> dict:

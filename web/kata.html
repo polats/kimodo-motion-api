@@ -51,6 +51,30 @@
     }
     .cam-btn:hover { background: rgba(62,62,70,0.9); }
     .cam-btn.on { background: #2d4a35; border-color: #3a6; color: #7ec77e; }
+    .cam-btn.hb { color: #fc8; }
+    .cam-btn.hb.on { background: #5a3a16; border-color: #b83; color: #fc8; }
+    /* Hitbox drawer (right, slide-in) */
+    #hitbox-drawer {
+      position: fixed; top: 0; right: 0; width: 320px; height: 100%; z-index: 32;
+      background: rgba(20,18,14,0.97); backdrop-filter: blur(6px); border-left: 1px solid #b8833a;
+      padding: 14px; overflow-y: auto; transform: translateX(100%); transition: transform .22s ease;
+    }
+    #hitbox-drawer.open { transform: translateX(0); }
+    #hitbox-drawer h2 { font-size: 14px; margin: 0 0 6px; color: #fc8; }
+    #hitbox-drawer .hb-sub { font-size: 11px; color: #caa; margin-bottom: 12px; line-height: 1.45; }
+    #hitbox-drawer .hb-close { position: absolute; top: 10px; right: 12px; background: none; border: none; color: #b98; font-size: 18px; line-height: 1; cursor: pointer; }
+    #hitbox-drawer .hb-close:hover { color: #fc8; }
+    /* dual-handle frame range */
+    .hb-dual { position: relative; height: 28px; margin: 2px 0 4px; }
+    .hb-dual::before { content: ''; position: absolute; left: 0; right: 0; top: 11px; height: 5px; border-radius: 3px; background: #3a2c18; }
+    .hb-dual-fill { position: absolute; top: 11px; height: 5px; border-radius: 3px; background: #e0922f; pointer-events: none; }
+    .hb-dual input[type=range] { position: absolute; left: 0; top: 0; width: 100%; height: 28px; margin: 0; background: none; pointer-events: none; -webkit-appearance: none; appearance: none; }
+    .hb-dual input[type=range]::-webkit-slider-runnable-track { background: none; height: 28px; border: none; }
+    .hb-dual input[type=range]::-moz-range-track { background: none; height: 28px; border: none; }
+    .hb-dual input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; pointer-events: auto; width: 16px; height: 16px; margin-top: 6px; border-radius: 50%; background: #fc8; border: 2px solid #b83; box-shadow: 0 0 3px #000a; cursor: pointer; }
+    .hb-dual input[type=range]::-moz-range-thumb { pointer-events: auto; width: 14px; height: 14px; border-radius: 50%; background: #fc8; border: 2px solid #b83; cursor: pointer; }
+    .hb-dual-lo { z-index: 3; }
+    .hb-dual-hi { z-index: 2; }
     /* Actions drawer (left, slide-in) */
     #left-tabs { position: fixed; left: 0; top: 50%; transform: translateY(-50%); z-index: 31; display: flex; flex-direction: column; gap: 6px; transition: left .22s ease; }
     .left-tab {
@@ -130,6 +154,7 @@
   <div id="cam-controls">
     <button id="cam-follow" class="cam-btn" title="Lock camera to follow the character">🎥</button>
     <button id="cam-reset" class="cam-btn" title="Reset to the default view">⌖</button>
+    <button id="cam-hitbox" class="cam-btn hb" title="Attack hitbox: pick a striking limb in the scene">◉</button>
   </div>
   <div id="axis-gizmo">
     <button id="axis-x" class="axis-btn ax-x" title="Align view down the X axis">X</button>
@@ -154,6 +179,12 @@
     <h2 style="font-size:14px;margin:0 0 6px">Actions library</h2>
     <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.4">Reusable moves for building katas. <b>Preview</b> plays it in the viewer; <b>regenerate</b> makes a fresh take.</div>
     <div id="actions-list"></div>
+  </div>
+  <div id="hitbox-drawer">
+    <button id="hitbox-close" class="hb-close" title="close">✕</button>
+    <h2>Attack hitbox</h2>
+    <div class="hb-sub">Pick the striking limb by <b>clicking a joint dot in the scene</b>, then set the active-frame window. Scrub to check it lines up with the strike.</div>
+    <div id="hitbox-body"></div>
   </div>
   <div id="panel">
     <h1>Kata move tree</h1>

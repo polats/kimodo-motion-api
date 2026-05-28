@@ -473,6 +473,7 @@ function updateGraph() {
 // First click on a node → play the whole path to it. Click the SAME node again
 // → toggle to viewing just that move (and back). The tree stays fully expanded.
 function onNodeClick(id) {
+  if (hbEditing) { mode = 'move'; select(id).then(seedHitboxFromSelection).then(renderHitboxCard); return }   // re-target the hitbox to the clicked move
   if (id === selectedId) mode = (mode === 'path' ? 'move' : 'path')
   else mode = 'path'
   select(id)
@@ -796,6 +797,323 @@ kataRegenBtn.onclick = () => {
   renderKataPanel()
 }
 kataDelBtn.onclick = () => deleteSelectedNode()
+
+// --- Attack hitbox: author + visualize (Phase 1, viewer-only) -------------
+// A move can carry a hitbox {jointA[,jointB], radius, start, end} stored on the clip
+// (/set_hitbox). ◉ opens an editor seeded by an auto-suggest (the striking limb +
+// its fastest contact window). We draw a capsule/sphere at the joint(s) during
+// playback, lit while inside the active frames. (Engine side is Phase 2.)
+let hbDraft = null, hbClip = null
+// Capsule far-end AND the "reach" axis: the limb's parent joint. Reach pushes the
+// hitbox from jointA *away* from this parent — i.e. wrist→toward the fist, ankle→toward
+// the toe. We only have the 22 body joints (the wrist is the most distal we capture;
+// the SMPL-X hand bones exist in some rigs but aren't animated and aren't portably named),
+// so the fist/toe is reached by offsetting along this bone direction rather than anchoring
+// on a finger bone. Stays in SMPL-X joint space → portable across rigs and bakes cleanly.
+const HB_PARENT = {
+  right_wrist: 'right_elbow', left_wrist: 'left_elbow', right_elbow: 'right_shoulder', left_elbow: 'left_shoulder',
+  right_ankle: 'right_knee', left_ankle: 'left_knee', right_foot: 'right_ankle', left_foot: 'left_ankle',
+  right_knee: 'right_hip', left_knee: 'left_hip', head: 'neck',
+}
+const HB_JOINTS = ['pelvis', 'spine1', 'spine2', 'spine3', 'neck', 'head', 'left_collar', 'left_shoulder', 'left_elbow', 'left_wrist', 'right_collar', 'right_shoulder', 'right_elbow', 'right_wrist', 'left_hip', 'left_knee', 'left_ankle', 'left_foot', 'right_hip', 'right_knee', 'right_ankle', 'right_foot']
+function jointBone(kname) {   // THREE bone for a kimodo joint name, via the rig mapping
+  if (!animator || !animator.mapping || !kname) return null
+  const bn = animator.mapping[kname]; if (!bn) return null
+  return animator.bonesByName[animator._normName(bn)] || null
+}
+// a fresh hitbox for a move that doesn't have one yet — a forearm capsule mid-clip;
+// the user then clicks the striking limb + drags the frame handles to fit.
+function defaultHitbox(clip) {
+  const nf = (clip?.num_frames) || curFrames || 30
+  return { jointA: 'right_wrist', jointB: 'right_elbow', radius: 0.08, reach: 0, start: Math.round(nf * 0.3), end: Math.round(nf * 0.55), damage: 25, tags: [] }
+}
+let hbGroup = null
+const _hbA = new THREE.Vector3(), _hbB = new THREE.Vector3(), _hbDir = new THREE.Vector3(), _hbReach = new THREE.Vector3()
+function ensureHitboxViz() {
+  if (hbGroup) return
+  const mk = () => new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.4, depthWrite: false })
+  hbGroup = new THREE.Group(); hbGroup.renderOrder = 999
+  hbGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), mk()),
+              new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), mk()),
+              new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 14, 1, true), mk()))
+  hbGroup.visible = false; scene.add(hbGroup)
+}
+function updateHitbox() {
+  ensureHitboxViz()
+  const seg = currentSeg()
+  let hb = null, authoring = false
+  if (hbEditing && hbDraft && seg && seg.id === selectedId) { hb = hbDraft; authoring = true }
+  else if (seg) hb = CTX.byId.get(seg.id)?.hitboxes?.[0]
+  const bA = hb && jointBone(hb.jointA)
+  if (!hb || !bA) { hbGroup.visible = false; return }
+  const active = seg.frame >= hb.start && seg.frame <= hb.end
+  if (!active && !authoring) { hbGroup.visible = false; return }
+  const r = (hb.radius || 0.08) * (animator?.scale || 1)
+  const [sa, sb, link] = hbGroup.children
+  for (const m of hbGroup.children) m.material.color.set(active ? 0xff2a3a : 0xc88030)
+  bA.getWorldPosition(_hbA)
+  // "reach": push jointA outward along the bone (away from its parent) toward the
+  // striking surface — wrist→fist, ankle→toe. Keeps the anchor in joint space.
+  const reach = (hb.reach || 0) * (animator?.scale || 1)
+  if (reach) {
+    const bPar = jointBone(HB_PARENT[hb.jointA])
+    if (bPar) { bPar.getWorldPosition(_hbReach); _hbReach.subVectors(_hbA, _hbReach); if (_hbReach.lengthSq() > 1e-9) _hbA.addScaledVector(_hbReach.normalize(), reach) }
+  }
+  sa.position.copy(_hbA); sa.scale.setScalar(r)
+  const bB = (hb.jointB && hb.jointB !== hb.jointA) ? jointBone(hb.jointB) : null
+  if (bB) {
+    bB.getWorldPosition(_hbB); sb.visible = link.visible = true; sb.position.copy(_hbB); sb.scale.setScalar(r)
+    _hbDir.subVectors(_hbB, _hbA); const len = _hbDir.length()
+    link.position.copy(_hbA).addScaledVector(_hbDir, 0.5); link.scale.set(r, Math.max(len, 1e-4), r)
+    link.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), _hbDir.normalize())
+  } else { sb.visible = link.visible = false }
+  hbGroup.visible = true
+}
+
+// --- Click-to-pick joints in the scene ------------------------------------
+// When the hitbox drawer is open, draw a small always-on-top dot at every
+// SMPL-X joint. Clicking a dot sets the strike point (jointA); the dot for the
+// current jointA is highlighted. Dots render through the body so they're easy
+// to target. Raycast against the dots (plain meshes — not the skinned body).
+let pickGroup = null
+const pickByName = new Map()
+let hoveredPick = null
+function ensureJointPickers() {
+  if (pickGroup) return
+  pickGroup = new THREE.Group(); pickGroup.renderOrder = 1001; pickGroup.visible = false
+  for (const kn of HB_JOINTS) {
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 12, 10),
+      new THREE.MeshBasicMaterial({ color: 0x9fd0ff, transparent: true, opacity: 0.85, depthTest: false, depthWrite: false }))
+    m.userData.kname = kn; m.renderOrder = 1001
+    pickGroup.add(m); pickByName.set(kn, m)
+  }
+  scene.add(pickGroup)
+}
+function updateJointPickers() {
+  ensureJointPickers()
+  pickGroup.visible = hbEditing
+  if (!hbEditing || !animator) return
+  // screen-constant dot size (independent of the model's world scale) so they're
+  // always easy to see and click — derived from camera distance to the target.
+  const base = 0.011 * (camera.position.distanceTo(controls.target) || 3.4)
+  // the strike point is red only while the playhead is inside the active window —
+  // matches the capsule — otherwise it's amber (selected, but not "live").
+  const seg = currentSeg()
+  const active = hbDraft && seg && seg.frame >= hbDraft.start && seg.frame <= hbDraft.end
+  for (const [kn, m] of pickByName) {
+    const b = jointBone(kn)
+    if (!b) { m.visible = false; continue }
+    b.getWorldPosition(_hbA); m.position.copy(_hbA); m.visible = true
+    const isA = hbDraft && kn === hbDraft.jointA
+    const isB = hbDraft && kn === hbDraft.jointB
+    const isHover = m === hoveredPick
+    m.scale.setScalar(base * (isA ? 1.9 : isHover ? 1.6 : 1))
+    m.material.color.set(isA ? (active ? 0xff2a3a : 0xffae50) : isB ? 0xffb060 : isHover ? 0xffffff : 0x9fd0ff)
+    m.material.opacity = isA || isB || isHover ? 1 : 0.7
+  }
+}
+const _ray = new THREE.Raycaster(), _ndc = new THREE.Vector2()
+function pickAt(e) {
+  const r = renderer.domElement.getBoundingClientRect()
+  _ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1
+  _ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1
+  _ray.setFromCamera(_ndc, camera)
+  const hits = _ray.intersectObjects(pickGroup ? pickGroup.children.filter(c => c.visible) : [], false)
+  return hits.length ? hits[0].object : null
+}
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!hbEditing) { if (hoveredPick) { hoveredPick = null } return }
+  const hit = pickAt(e)
+  hoveredPick = hit
+  renderer.domElement.style.cursor = hit ? 'pointer' : ''
+})
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (!hbEditing || e.button !== 0) return
+  const hit = pickAt(e)
+  if (!hit || !hbDraft) return
+  e.stopPropagation()   // don't let OrbitControls start a drag from a pick
+  const wasCapsule = !!hbDraft.jointB   // keep the current shape; just move the strike point
+  hbDraft.jointA = hit.userData.kname
+  hbDraft.jointB = wasCapsule ? (HB_PARENT[hbDraft.jointA] || null) : null   // capsule follows the limb
+  renderHitboxCard()
+}, true)   // capture phase so we intercept before OrbitControls
+const JOINT_NICE = (j) => (j || '').replace(/_/g, ' ')
+function renderHitboxCard() {
+  if (!hitboxBody) return
+  hitboxBody.innerHTML = ''
+  const mkbtn = (txt, css, fn) => { const b = document.createElement('button'); b.textContent = txt; b.style.cssText = 'flex:1;padding:6px;font-size:11px;border-radius:5px;cursor:pointer;' + css; b.onclick = fn; return b }
+  const amber = 'background:#3a2a14;color:#fc8;border:1px solid #b83'
+
+  // Show mode: read-only overlay during whole-kata playback. List the hitboxes
+  // attached to moves in the current kata; ✎ enters edit on the playing move.
+  if (!hbEditing) {
+    const hint = document.createElement('div'); hint.style.cssText = 'font-size:12px;color:#caa;line-height:1.5;margin-bottom:10px'
+    hint.innerHTML = 'Hitboxes flash <span style="color:#ff7a8a">red</span> during their active frames as the kata plays through. Press <b>✎ edit</b> to author the hitbox on the currently playing move.'
+    hitboxBody.appendChild(hint)
+
+    // list what's already attached, in path order
+    const list = document.createElement('div'); list.style.cssText = 'background:#1c1410;border:1px solid #5a3a16;border-radius:7px;padding:7px 9px;margin-bottom:10px;font-size:11px;color:#dcdce0'
+    const ids = pathSet.size ? [...pathSet] : (selectedId ? [selectedId] : [])
+    let any = false
+    for (const id of ids) {
+      const rec = CTX.byId.get(id); const hbs = rec?.hitboxes
+      if (!hbs || !hbs.length) continue
+      any = true
+      const row = document.createElement('div'); row.style.cssText = 'display:flex;justify-content:space-between;gap:8px;padding:3px 0'
+      const h = hbs[0]
+      const lbl = document.createElement('span'); lbl.style.cssText = 'color:#ffce99;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      lbl.textContent = (rec.prompt || id.slice(0,8)).slice(0,32)
+      const meta = document.createElement('span'); meta.style.cssText = 'color:#a98;font-size:10px;white-space:nowrap'
+      meta.textContent = `${JOINT_NICE(h.jointA)}${h.jointB?' → '+JOINT_NICE(h.jointB):''} · f${h.start}-${h.end}`
+      row.appendChild(lbl); row.appendChild(meta); list.appendChild(row)
+    }
+    if (!any) { const m = document.createElement('div'); m.style.cssText = 'color:#a98;font-style:italic'; m.textContent = 'No hitboxes on this kata yet.'; list.appendChild(m) }
+    hitboxBody.appendChild(list)
+
+    const er = document.createElement('div'); er.style.cssText = 'display:flex;gap:6px'
+    er.appendChild(mkbtn('✎ edit hitbox on current move', 'background:#5a3a16;color:#fc8;border:1px solid #b83', () => enterHitboxEdit()))
+    hitboxBody.appendChild(er)
+    return
+  }
+
+  // Edit mode below. "← back" out to the read-only show overlay.
+  const nf = (hbClip?.num_frames) || curFrames || 1
+  const back = document.createElement('button'); back.textContent = '← back to overview'
+  back.style.cssText = 'background:transparent;color:#caa;border:none;font-size:11px;cursor:pointer;padding:0 0 8px;text-align:left'
+  back.onclick = () => exitHitboxEdit()
+  hitboxBody.appendChild(back)
+
+  // No hitbox on this move yet → offer to create one (changes start auto-saving).
+  if (!hbDraft) {
+    const m = document.createElement('div'); m.style.cssText = 'font-size:12px;color:#caa;line-height:1.5;margin-bottom:12px'
+    m.textContent = 'This move has no hitbox yet.'
+    hitboxBody.appendChild(m)
+    const cb = document.createElement('button'); cb.textContent = '＋ Create hitbox'
+    cb.style.cssText = 'width:100%;padding:10px;font-size:13px;border-radius:7px;cursor:pointer;background:#5a3a16;color:#fc8;border:1px solid #b83'
+    cb.onclick = () => { hbDraft = defaultHitbox(hbClip); autoSaveHitbox(); renderHitboxCard() }
+    hitboxBody.appendChild(cb); return
+  }
+
+  // strike point — set by clicking a joint dot in the scene
+  const sp = document.createElement('div'); sp.style.cssText = 'background:#241a0c;border:1px solid #b83;border-radius:7px;padding:9px 11px;margin-bottom:10px'
+  const spl = document.createElement('div'); spl.style.cssText = 'font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:#b98;margin-bottom:3px'; spl.textContent = 'Strike point'
+  const spv = document.createElement('div'); spv.style.cssText = 'font-size:16px;color:#ffce99;font-weight:600;text-transform:capitalize'; spv.textContent = JOINT_NICE(hbDraft.jointA)
+  const sph = document.createElement('div'); sph.style.cssText = 'font-size:10px;color:#a98;margin-top:3px'; sph.innerHTML = '◉ click a <b>red/blue dot</b> in the scene to move it'
+  sp.appendChild(spl); sp.appendChild(spv); sp.appendChild(sph); hitboxBody.appendChild(sp)
+
+  // shape: capsule (along the limb) vs point (sphere)
+  const isCapsule = !!hbDraft.jointB
+  const shr = document.createElement('div'); shr.style.cssText = 'display:flex;gap:6px;margin-bottom:10px'
+  const onSel = 'background:#5a3a16;color:#fc8;border:1px solid #b83', off = 'background:#241a0c;color:#a98;border:1px solid #5a4326'
+  shr.appendChild(mkbtn('▬ Capsule', isCapsule ? onSel : off, () => { hbDraft.jointB = HB_PARENT[hbDraft.jointA] || null; if (!hbDraft.jointB) setStatus('no limb segment for that joint — using a point'); autoSaveHitbox(); renderHitboxCard() }))
+  shr.appendChild(mkbtn('● Point', !isCapsule ? onSel : off, () => { hbDraft.jointB = null; autoSaveHitbox(); renderHitboxCard() }))
+  hitboxBody.appendChild(shr)
+  if (isCapsule) { const cl = document.createElement('div'); cl.style.cssText = 'font-size:10px;color:#a98;margin:-5px 0 9px'; cl.textContent = `along ${JOINT_NICE(hbDraft.jointA)} → ${JOINT_NICE(hbDraft.jointB)}`; hitboxBody.appendChild(cl) }
+
+  // radius
+  const rr = document.createElement('div'); rr.className = 'dur'
+  const rt = document.createElement('span'); rt.className = 'dur-tag'; rt.textContent = '⌀'; rt.title = 'radius'
+  const rng = document.createElement('input'); rng.type = 'range'; rng.min = '0.02'; rng.max = '0.3'; rng.step = '0.005'; rng.value = String(hbDraft.radius)
+  const rl = document.createElement('span'); rl.className = 'dur-lbl'; rl.textContent = `${Math.round(hbDraft.radius * 100)}cm`
+  rng.oninput = () => { hbDraft.radius = Number(rng.value); rl.textContent = `${Math.round(hbDraft.radius * 100)}cm` }
+  rng.onchange = () => autoSaveHitbox()
+  rr.appendChild(rt); rr.appendChild(rng); rr.appendChild(rl); hitboxBody.appendChild(rr)
+  // reach: slide the anchor outward past the joint toward the striking surface (fist / toe)
+  const xr = document.createElement('div'); xr.className = 'dur'
+  const xt = document.createElement('span'); xt.className = 'dur-tag'; xt.textContent = '↦'; xt.title = 'reach past the joint toward the fist / toe'
+  const xng = document.createElement('input'); xng.type = 'range'; xng.min = '0'; xng.max = '0.2'; xng.step = '0.005'; xng.value = String(hbDraft.reach || 0)
+  const xl = document.createElement('span'); xl.className = 'dur-lbl'; xl.textContent = `+${Math.round((hbDraft.reach || 0) * 100)}cm`
+  xng.oninput = () => { hbDraft.reach = Number(xng.value); xl.textContent = `+${Math.round(hbDraft.reach * 100)}cm` }
+  xng.onchange = () => autoSaveHitbox()
+  xr.appendChild(xt); xr.appendChild(xng); xr.appendChild(xl); hitboxBody.appendChild(xr)
+
+  // active-frame window — dual-handle bar (drag start/end)
+  const wl = document.createElement('div'); wl.style.cssText = 'font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:#b98;margin:4px 0 4px'
+  const setWl = () => { wl.textContent = `Active frames  ${hbDraft.start}–${hbDraft.end} / ${nf - 1}` }
+  setWl(); hitboxBody.appendChild(wl)
+  hitboxBody.appendChild(mkFrameRange(nf, hbDraft, setWl))
+
+  // delete (clear removes the hitbox from the move)
+  const sr = document.createElement('div'); sr.style.cssText = 'display:flex;gap:6px;margin-top:12px'
+  sr.appendChild(mkbtn('🗑 delete hitbox', 'background:#3a2330;color:#f6a;border:1px solid #a44', () => deleteHitbox()))
+  hitboxBody.appendChild(sr)
+}
+// Dual-handle frame range: two overlapping range inputs over a filled track. lo/hi
+// clamp so start ≤ end; live drag updates the draft + label, commit auto-saves.
+function mkFrameRange(nf, draft, onLive) {
+  const max = Math.max(1, nf - 1)
+  const wrap = document.createElement('div'); wrap.className = 'hb-dual'
+  const fill = document.createElement('div'); fill.className = 'hb-dual-fill'
+  const lo = document.createElement('input'); lo.type = 'range'; lo.min = 0; lo.max = max; lo.step = 1; lo.value = draft.start; lo.className = 'hb-dual-lo'
+  const hi = document.createElement('input'); hi.type = 'range'; hi.min = 0; hi.max = max; hi.step = 1; hi.value = draft.end; hi.className = 'hb-dual-hi'
+  const paint = () => { const a = draft.start / max * 100, b = draft.end / max * 100; fill.style.left = a + '%'; fill.style.width = Math.max(0, b - a) + '%' }
+  lo.oninput = () => { draft.start = Math.min(Number(lo.value), draft.end); lo.value = draft.start; paint(); onLive && onLive() }
+  hi.oninput = () => { draft.end = Math.max(Number(hi.value), draft.start); hi.value = draft.end; paint(); onLive && onLive() }
+  lo.onchange = hi.onchange = () => autoSaveHitbox()
+  wrap.appendChild(fill); wrap.appendChild(lo); wrap.appendChild(hi); paint(); return wrap
+}
+// Auto-save: every edit persists the move's hitbox in place (no Save button).
+// Optimistic local update so show-mode reflects instantly; the POST is debounced
+// so dragging a slider/handle coalesces into one write.
+let _hbSaveTimer = null
+function autoSaveHitbox() {
+  if (!hbDraft || !selectedId) return
+  const rec = CTX.byId.get(selectedId); if (rec) rec.hitboxes = [{ ...hbDraft }]
+  const id = selectedId, payload = [{ ...hbDraft }]
+  clearTimeout(_hbSaveTimer)
+  _hbSaveTimer = setTimeout(async () => {
+    try {
+      const r = await fetch(`${KIMODO_URL}/set_hitbox`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, hitboxes: payload }) })
+      if (!r.ok) throw new Error(`set_hitbox ${r.status}`)
+    } catch (e) { setStatus('hitbox save failed: ' + e.message) }
+  }, 250)
+}
+async function deleteHitbox() {
+  if (!selectedId) return
+  try {
+    await fetch(`${KIMODO_URL}/set_hitbox`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: selectedId, hitboxes: [] }) })
+    const rec = CTX.byId.get(selectedId); if (rec) rec.hitboxes = []
+    hbDraft = null; setStatus('hitbox deleted'); renderHitboxCard()   // back to "+ create"
+  } catch (e) { setStatus('delete failed: ' + e.message) }
+}
+// --- Hitbox drawer (right side) + click-to-pick striking limb --------------
+// Two sub-states. hbOpen alone = "show" mode: hitboxes flash over the whole-kata
+// playback (read-only), the drawer just lists what's there and offers an ✎ edit.
+// hbEditing = "edit" mode: locks to the selected move (mode='move'), seeds hbDraft,
+// shows the joint pickers + full editor card. Mirrors the regenerate-card UX.
+let hbOpen = false, hbEditing = false
+const camHitboxBtn = document.getElementById('cam-hitbox')
+const hitboxDrawer = document.getElementById('hitbox-drawer')
+const hitboxBody = document.getElementById('hitbox-body')
+const hitboxCloseBtn = document.getElementById('hitbox-close')
+async function seedHitboxFromSelection() {
+  if (!selectedId || !CTX.byId.has(selectedId)) { hbClip = null; hbDraft = null; return }
+  hbClip = await fetchAnimation(selectedId)
+  hbDraft = (hbClip.hitboxes && hbClip.hitboxes[0]) ? { ...hbClip.hitboxes[0] } : null   // null = no hitbox yet → "+ create"
+}
+async function openHitbox(on) {
+  hbOpen = on
+  if (!on) hbEditing = false   // closing the drawer always exits edit too
+  camHitboxBtn.classList.toggle('on', on)
+  hitboxDrawer.classList.toggle('open', on)
+  renderHitboxCard()
+}
+async function enterHitboxEdit() {
+  // Edit needs a selected move — the active-frame window is in that clip's frames.
+  const seg = currentSeg(); const id = (seg && seg.id) || selectedId
+  if (!id || !CTX.byId.has(id)) { setStatus('click a move in the tree first, then ✎ to edit its hitbox'); return }
+  hbEditing = true
+  mode = 'move'; await select(id); await seedHitboxFromSelection()
+  renderHitboxCard()
+}
+function exitHitboxEdit() {
+  hbEditing = false
+  mode = 'path'; if (selectedId) select(selectedId)   // resume whole-kata flow
+  renderHitboxCard()
+}
+camHitboxBtn.onclick = () => openHitbox(!hbOpen)
+hitboxCloseBtn.onclick = () => openHitbox(false)
 
 // --- Actions library drawer -----------------------------------------------
 // Reusable standalone moves (continues_from = none) matched to store clips by
@@ -1204,6 +1522,8 @@ function tick() {
   animator?.update()
   syncTwistBones()
   syncClothing()
+  updateHitbox()
+  updateJointPickers()
   // The move whose segment is playing: highlight + pulse it, and run a playhead
   // down its timeline bar tracking the exact frame on screen.
   let shown = false
