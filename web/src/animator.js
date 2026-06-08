@@ -120,6 +120,7 @@ export class Animator {
     this.elapsed = 0
     this.lastTime = 0
     this.playing = false
+    this.timeRemap = null   // optional (u:0..1)→(0..1) playback remap; see update()
   }
 
   _buildPairs() {
@@ -298,13 +299,26 @@ export class Animator {
     this.elapsed += dt
 
     const m = this.motion
-    const target = Math.floor(this.elapsed * m.fps)
     let f
-    if (this.loop) {
-      f = ((target % m.num_frames) + m.num_frames) % m.num_frames
+    if (this.timeRemap) {
+      // Optional playback time-remap (kata "tween" curve): map normalized
+      // real-time through the move → normalized clip position, then to a frame.
+      // Lets a move's playback be reshaped (slow wind-up → fast strike) without
+      // touching the baked data — the curve is authored/stored per move.
+      const dur = m.num_frames / m.fps
+      let u = dur > 1e-6 ? this.elapsed / dur : 0
+      if (this.loop) u = ((u % 1) + 1) % 1
+      else if (u >= 1) { u = 1; this.playing = false }
+      const p = Math.max(0, Math.min(1, this.timeRemap(Math.max(0, Math.min(1, u)))))
+      f = Math.round(p * (m.num_frames - 1))
     } else {
-      f = Math.min(target, m.num_frames - 1)
-      if (target >= m.num_frames) this.playing = false
+      const target = Math.floor(this.elapsed * m.fps)
+      if (this.loop) {
+        f = ((target % m.num_frames) + m.num_frames) % m.num_frames
+      } else {
+        f = Math.min(target, m.num_frames - 1)
+        if (target >= m.num_frames) this.playing = false
+      }
     }
     if (f === this.frame) return
     this.frame = f

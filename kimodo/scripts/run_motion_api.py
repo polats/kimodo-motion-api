@@ -135,9 +135,28 @@ class HitboxDef(BaseModel):
     tags: list[str] = []
 
 
+class TimingPoint(BaseModel):
+    # DAW-automation-style breakpoint for a move's playback time-remap.
+    # x = normalized real-time through the move (0..1); y = normalized clip
+    # position (0..1); c = curvature of the segment from this point to the next
+    # (-1..1, 0 = linear). A monotonic curve retimes the move (slow wind-up →
+    # fast strike → ease-out); a flat segment (equal y) = a freeze/hold.
+    x: float
+    y: float
+    c: float = 0.0
+
+
+class TimingDef(BaseModel):
+    points: list[TimingPoint] = []
+
+
 class SetHitboxRequest(BaseModel):
     id: str
     hitboxes: list[HitboxDef] = []
+    # Optional, additive: a per-move playback time-remap curve. Absent/None ⇒ the
+    # field is left untouched on the clip (linear playback). Pass an empty-points
+    # TimingDef to clear it.
+    timing: TimingDef | None = None
 
 
 def _passthrough(iterable, *args, **kwargs):
@@ -687,8 +706,16 @@ def build_app() -> FastAPI:
         if rec is None:
             raise HTTPException(404, f"clip '{req.id}' not found")
         rec["hitboxes"] = [h.model_dump() for h in req.hitboxes]
+        # Additive: only touch `timing` when the request carries it, so callers that
+        # only set hitboxes don't wipe an authored curve. Empty points clears it.
+        if req.timing is not None:
+            pts = [p.model_dump() for p in req.timing.points]
+            if pts:
+                rec["timing"] = {"points": pts}
+            else:
+                rec.pop("timing", None)
         store.save(rec)   # LocalFsStore keeps the existing id → overwrites in place
-        return {"id": req.id, "hitboxes": rec["hitboxes"]}
+        return {"id": req.id, "hitboxes": rec["hitboxes"], "timing": rec.get("timing")}
 
     @app.get("/animations")
     def list_animations() -> dict:

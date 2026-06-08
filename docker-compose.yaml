@@ -75,9 +75,9 @@ services:
       # Motion API (run_motion_api.py) — primary service consumed by woid.
       - "${SERVER_PORT:-7862}:${SERVER_PORT:-7862}"
       # Gradio demo port — kept mapped for `docker exec demo python -m kimodo.demo`.
-      - "7860:7860"
+      - "${GRADIO_PORT:-7860}:7860"
       # run_simple_app port — kept mapped for ad-hoc `docker exec` launches.
-      - "7861:7861"
+      - "${SIMPLE_APP_PORT:-7861}:7861"
     environment:
       # Point the model at the text-encoder service.
       - TEXT_ENCODER_URL=http://text-encoder:9550/

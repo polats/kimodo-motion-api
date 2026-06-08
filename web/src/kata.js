@@ -804,6 +804,21 @@ kataDelBtn.onclick = () => deleteSelectedNode()
 // its fastest contact window). We draw a capsule/sphere at the joint(s) during
 // playback, lit while inside the active frames. (Engine side is Phase 2.)
 let hbDraft = null, hbClip = null
+let hbTiming = null   // per-move playback "tween" curve being authored: [{x,y,c},…] or null
+const IDENTITY_TIMING = () => [{ x: 0, y: 0, c: 0 }, { x: 1, y: 1, c: 0 }]
+const isIdentityTiming = (pts) => !pts || pts.length === 2 && pts[0].x === 0 && pts[0].y === 0 && pts[1].x === 1 && pts[1].y === 1 && !pts[0].c && !pts[1].c
+// DAW-automation-style time remap. pts: breakpoints {x:realtime, y:clip-pos, c:segment
+// curvature -1..1}. Returns clip position (0..1) for normalized real-time t (0..1). A
+// flat segment (equal y) = a freeze/hold. Mirrored verbatim in the s&box baker/runtime.
+function evalTiming(pts, t) {
+  if (!pts || pts.length < 2) return t
+  t = Math.max(0, Math.min(1, t))
+  let i = 0; while (i < pts.length - 2 && t > pts[i + 1].x) i++
+  const a = pts[i], b = pts[i + 1], dx = b.x - a.x
+  let u = dx > 1e-6 ? (t - a.x) / dx : 0; u = Math.max(0, Math.min(1, u))
+  const p = Math.pow(2, (a.c || 0) * 4)   // c=0 linear; c>0 ease-in (slow start); c<0 ease-out
+  return a.y + (b.y - a.y) * Math.pow(u, p)
+}
 // Capsule far-end AND the "reach" axis: the limb's parent joint. Reach pushes the
 // hitbox from jointA *away* from this parent — i.e. wrist→toward the fist, ankle→toward
 // the toe. We only have the 22 body joints (the wrist is the most distal we capture;
@@ -1034,6 +1049,18 @@ function renderHitboxCard() {
   setWl(); hitboxBody.appendChild(wl)
   hitboxBody.appendChild(mkFrameRange(nf, hbDraft, setWl))
 
+  // timing / tween — DAW-automation-style curve that retimes the move's playback
+  const tl = document.createElement('div'); tl.style.cssText = 'font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:#b98;margin:12px 0 4px;display:flex;justify-content:space-between;align-items:center'
+  tl.innerHTML = '<span>Timing / tween</span>'
+  const treset = document.createElement('button'); treset.textContent = 'linear'; treset.title = 'reset to linear (no remap)'
+  treset.style.cssText = 'background:#241a0c;color:#a98;border:1px solid #5a4326;border-radius:4px;font-size:10px;padding:1px 7px;cursor:pointer'
+  treset.onclick = () => { hbTiming = IDENTITY_TIMING(); autoSaveHitbox(); renderHitboxCard() }
+  tl.appendChild(treset); hitboxBody.appendChild(tl)
+  const th = document.createElement('div'); th.style.cssText = 'font-size:10px;color:#a98;margin-bottom:5px;line-height:1.4'
+  th.textContent = 'x = time through the move · y = pose position. Drag dots; drag a segment ✚ to bend; double-click to add, double-click a dot to remove.'
+  hitboxBody.appendChild(th)
+  hitboxBody.appendChild(mkTimingEditor())
+
   // delete (clear removes the hitbox from the move)
   const sr = document.createElement('div'); sr.style.cssText = 'display:flex;gap:6px;margin-top:12px'
   sr.appendChild(mkbtn('🗑 delete hitbox', 'background:#3a2330;color:#f6a;border:1px solid #a44', () => deleteHitbox()))
@@ -1053,18 +1080,113 @@ function mkFrameRange(nf, draft, onLive) {
   lo.onchange = hi.onchange = () => autoSaveHitbox()
   wrap.appendChild(fill); wrap.appendChild(lo); wrap.appendChild(hi); paint(); return wrap
 }
+// DAW-automation-style curve editor for hbTiming. SVG graph: x=real-time, y=clip
+// position (y up). Drag dots to move breakpoints; drag a segment's ✚ handle
+// vertically to bend it; double-click empty space to add a point, double-click a
+// dot to remove it. Endpoints are x-locked (0 and 1) but y-draggable. Edits mutate
+// hbTiming in place, re-render, and debounce-save.
+function mkTimingEditor() {
+  const W = 268, H = 150, M = 14            // svg size + margin
+  const PW = W - 2 * M, PH = H - 2 * M
+  const NS = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(NS, 'svg')
+  svg.setAttribute('width', W); svg.setAttribute('height', H)
+  svg.style.cssText = 'background:#1a130a;border:1px solid #5a4326;border-radius:6px;touch-action:none;display:block'
+  const X = (x) => M + x * PW, Y = (y) => M + (1 - y) * PH
+  const invX = (px) => Math.max(0, Math.min(1, (px - M) / PW))
+  const invY = (py) => Math.max(0, Math.min(1, 1 - (py - M) / PH))
+  const el = (n, a) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); return e }
+  const pts = hbTiming
+
+  function localXY(ev) { const r = svg.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top] }
+  function redraw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild)
+    // frame: border + identity diagonal + grid
+    svg.appendChild(el('line', { x1: X(0), y1: Y(0), x2: X(1), y2: Y(1), stroke: '#3a2c18', 'stroke-width': 1, 'stroke-dasharray': '3 3' }))
+    // active-frame window shaded (in x = its share of the clip, mapped through... shown in clip-frame x for reference)
+    if (hbDraft && nfForTiming() > 1) {
+      const x0 = hbDraft.start / (nfForTiming() - 1), x1 = hbDraft.end / (nfForTiming() - 1)
+      svg.appendChild(el('rect', { x: X(Math.min(x0, x1)), y: M, width: Math.abs(X(x1) - X(x0)), height: PH, fill: '#ff2a3a', opacity: 0.10 }))
+    }
+    // curve polyline (sampled through evalTiming)
+    let d = ''
+    for (let i = 0; i <= 48; i++) { const t = i / 48; d += (i ? 'L' : 'M') + X(t).toFixed(1) + ',' + Y(evalTiming(pts, t)).toFixed(1) + ' ' }
+    svg.appendChild(el('path', { d, fill: 'none', stroke: '#fc8', 'stroke-width': 2 }))
+    // playhead (current normalized real-time, when this move is the one playing)
+    if (animator && animator.playing && curFrames > 1 && mode === 'move') {
+      const u = ((animator.elapsed * (animator.motion?.fps || 30)) / curFrames) % 1
+      if (u >= 0) svg.appendChild(el('line', { x1: X(u), y1: M, x2: X(u), y2: M + PH, stroke: '#5ad1ff', 'stroke-width': 1, opacity: 0.7 }))
+    }
+    // segment bend handles (midpoint ✚)
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1], mx = (a.x + b.x) / 2
+      const my = evalTiming(pts, mx)
+      const h = el('circle', { cx: X(mx), cy: Y(my), r: 4, fill: '#2a1d0e', stroke: '#b87', 'stroke-width': 1.5, cursor: 'ns-resize' })
+      h.addEventListener('pointerdown', (ev) => startBend(ev, i))
+      svg.appendChild(h)
+    }
+    // breakpoints (draggable dots)
+    pts.forEach((p, i) => {
+      const dot = el('circle', { cx: X(p.x), cy: Y(p.y), r: 5.5, fill: '#fc8', stroke: '#1a130a', 'stroke-width': 1.5, cursor: 'grab' })
+      dot.addEventListener('pointerdown', (ev) => startDrag(ev, i))
+      dot.addEventListener('dblclick', (ev) => { ev.stopPropagation(); removePoint(i) })
+      svg.appendChild(dot)
+    })
+  }
+  function nfForTiming() { return (hbClip?.num_frames) || curFrames || 1 }
+  function commit() { redraw(); autoSaveHitbox() }
+
+  function startDrag(ev, i) {
+    ev.preventDefault(); ev.stopPropagation(); svg.setPointerCapture(ev.pointerId)
+    const move = (e) => {
+      const [px, py] = localXY(e)
+      const p = pts[i]
+      if (i > 0 && i < pts.length - 1) {            // middle: x between neighbors
+        p.x = Math.max(pts[i - 1].x + 0.01, Math.min(pts[i + 1].x - 0.01, invX(px)))
+      }                                              // endpoints: x locked
+      p.y = invY(py)
+      redraw()
+    }
+    const up = (e) => { svg.releasePointerCapture(ev.pointerId); svg.removeEventListener('pointermove', move); svg.removeEventListener('pointerup', up); autoSaveHitbox() }
+    svg.addEventListener('pointermove', move); svg.addEventListener('pointerup', up)
+  }
+  function startBend(ev, i) {
+    ev.preventDefault(); ev.stopPropagation(); svg.setPointerCapture(ev.pointerId)
+    const a = pts[i], b = pts[i + 1], straightMidY = (a.y + b.y) / 2
+    const move = (e) => {
+      const [, py] = localXY(e)
+      // map vertical offset from the straight-line midpoint → curvature (-1..1)
+      const dy = invY(py) - straightMidY
+      a.c = Math.max(-1, Math.min(1, -dy * 3))
+      redraw()
+    }
+    const up = () => { svg.releasePointerCapture(ev.pointerId); svg.removeEventListener('pointermove', move); svg.removeEventListener('pointerup', up); autoSaveHitbox() }
+    svg.addEventListener('pointermove', move); svg.addEventListener('pointerup', up)
+  }
+  function removePoint(i) { if (i <= 0 || i >= pts.length - 1) return; pts.splice(i, 1); commit() }   // keep endpoints
+  svg.addEventListener('dblclick', (ev) => {
+    const [px, py] = localXY(ev); const x = invX(px)
+    if (x <= 0.01 || x >= 0.99) return
+    let i = 0; while (i < pts.length - 1 && x > pts[i + 1].x) i++
+    pts.splice(i + 1, 0, { x, y: invY(py), c: 0 }); commit()
+  })
+  redraw(); return svg
+}
 // Auto-save: every edit persists the move's hitbox in place (no Save button).
 // Optimistic local update so show-mode reflects instantly; the POST is debounced
 // so dragging a slider/handle coalesces into one write.
 let _hbSaveTimer = null
 function autoSaveHitbox() {
   if (!hbDraft || !selectedId) return
-  const rec = CTX.byId.get(selectedId); if (rec) rec.hitboxes = [{ ...hbDraft }]
+  // identity curve ⇒ store no curve (empty points clears it server-side)
+  const timingPts = isIdentityTiming(hbTiming) ? [] : hbTiming.map(p => ({ x: p.x, y: p.y, c: p.c || 0 }))
+  const rec = CTX.byId.get(selectedId)
+  if (rec) { rec.hitboxes = [{ ...hbDraft }]; rec.timing = timingPts.length ? { points: timingPts } : undefined }
   const id = selectedId, payload = [{ ...hbDraft }]
   clearTimeout(_hbSaveTimer)
   _hbSaveTimer = setTimeout(async () => {
     try {
-      const r = await fetch(`${KIMODO_URL}/set_hitbox`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, hitboxes: payload }) })
+      const r = await fetch(`${KIMODO_URL}/set_hitbox`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, hitboxes: payload, timing: { points: timingPts } }) })
       if (!r.ok) throw new Error(`set_hitbox ${r.status}`)
     } catch (e) { setStatus('hitbox save failed: ' + e.message) }
   }, 250)
@@ -1072,9 +1194,9 @@ function autoSaveHitbox() {
 async function deleteHitbox() {
   if (!selectedId) return
   try {
-    await fetch(`${KIMODO_URL}/set_hitbox`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: selectedId, hitboxes: [] }) })
-    const rec = CTX.byId.get(selectedId); if (rec) rec.hitboxes = []
-    hbDraft = null; setStatus('hitbox deleted'); renderHitboxCard()   // back to "+ create"
+    await fetch(`${KIMODO_URL}/set_hitbox`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: selectedId, hitboxes: [], timing: { points: [] } }) })
+    const rec = CTX.byId.get(selectedId); if (rec) { rec.hitboxes = []; rec.timing = undefined }
+    hbDraft = null; hbTiming = null; setStatus('hitbox deleted'); renderHitboxCard()   // back to "+ create"
   } catch (e) { setStatus('delete failed: ' + e.message) }
 }
 // --- Hitbox drawer (right side) + click-to-pick striking limb --------------
@@ -1091,6 +1213,8 @@ async function seedHitboxFromSelection() {
   if (!selectedId || !CTX.byId.has(selectedId)) { hbClip = null; hbDraft = null; return }
   hbClip = await fetchAnimation(selectedId)
   hbDraft = (hbClip.hitboxes && hbClip.hitboxes[0]) ? { ...hbClip.hitboxes[0] } : null   // null = no hitbox yet → "+ create"
+  hbTiming = (hbClip.timing && hbClip.timing.points && hbClip.timing.points.length >= 2)
+    ? hbClip.timing.points.map(p => ({ x: p.x, y: p.y, c: p.c || 0 })) : IDENTITY_TIMING()
 }
 async function openHitbox(on) {
   hbOpen = on
@@ -1518,7 +1642,18 @@ document.addEventListener('pointerdown', (e) => {
 })
 
 // --- Boot -----------------------------------------------------------------
+// Active playback time-remap: while authoring, the live draft curve; otherwise the
+// move's saved curve when viewing a single move. Kata-path playback stays linear
+// (per-move retiming there is the s&box runtime's job). Applied before update().
+function applyTimingRemap() {
+  if (!animator) return
+  let pts = null
+  if (hbEditing && hbTiming && !isIdentityTiming(hbTiming)) pts = hbTiming
+  else if (mode === 'move' && selectedId) { const t = CTX.byId.get(selectedId)?.timing; if (t && !isIdentityTiming(t.points)) pts = t.points }
+  animator.timeRemap = pts ? ((u) => evalTiming(pts, u)) : null
+}
 function tick() {
+  applyTimingRemap()
   animator?.update()
   syncTwistBones()
   syncClothing()
