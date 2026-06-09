@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """HTTP API for kimodo motion generation. Decouples generation from any viewer.
 
-POST /generate { prompt: str, seconds: float = 5 }
+POST /generate { prompt: str, seconds: float = 5, num_steps: int | None = None }
   -> { fps, num_frames, bone_names, local_quats_wxyz [T,J,4], root_positions [T,3] }
+  (num_steps overrides the diffusion step count; default = NUM_DENOISING_STEPS)
 
 GET  /info
   -> static metadata about the loaded model.
@@ -61,6 +62,7 @@ class GenerateRequest(BaseModel):
     # Truncate the clip at its dynamic peak so it ENDS mid-action (not grounded):
     # "kick" = frame the foot is highest, "punch" = frame the arm is most extended.
     end_on_peak: str | None = None
+    num_steps: int | None = None  # override diffusion steps (default = NUM_DENOISING_STEPS)
 
 
 class GenerateSequenceRequest(BaseModel):
@@ -72,6 +74,7 @@ class GenerateSequenceRequest(BaseModel):
     # Per-segment duration: one value for all segments, or a list matching prompts.
     seconds: float | list[float] = DEFAULT_SECONDS
     num_transition_frames: int = 5
+    num_steps: int | None = None  # override diffusion steps (default = NUM_DENOISING_STEPS)
     # If True, also slice the continuous motion into one tree NODE per prompt
     # (each re-rooted to origin, chained via continues_from) so the kata appears
     # as individually-viewable moves in the /kata tree. Returns {"nodes": [...]}.
@@ -448,7 +451,7 @@ def build_app() -> FastAPI:
                 out = model(
                     [req.prompt],
                     num_frames,
-                    NUM_DENOISING_STEPS,
+                    int(req.num_steps) if req.num_steps else NUM_DENOISING_STEPS,
                     constraint_lst=constraint_lst,
                     # Enable post-processing only for constrained runs:
                     # foot-skate cleanup + constraint enforcement tightens the
@@ -492,7 +495,7 @@ def build_app() -> FastAPI:
                 out = model(
                     prompts,
                     num_frames,
-                    NUM_DENOISING_STEPS,
+                    int(req.num_steps) if req.num_steps else NUM_DENOISING_STEPS,
                     num_samples=1,        # required for the multi_prompt path (bs = num_samples)
                     multi_prompt=True,
                     num_transition_frames=ntf,
