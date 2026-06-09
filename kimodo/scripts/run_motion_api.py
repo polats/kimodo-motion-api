@@ -27,7 +27,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from kimodo.constraints import FullBodyConstraintSet, compute_global_heading, load_constraints_lst
+from kimodo.constraints import (
+    EndEffectorConstraintSet,
+    FullBodyConstraintSet,
+    TYPE_TO_CLASS,
+    compute_global_heading,
+    load_constraints_lst,
+)
 from kimodo.motion_rep.feature_utils import compute_heading_angle
 from kimodo.model.load_model import load_model
 from kimodo.scripts.animation_store import make_store
@@ -328,6 +334,75 @@ def build_app() -> FastAPI:
             global_joints_rots=rots_stack,
         )
 
+    def _constraint_from_global(d: dict):
+        """Build a fullbody/end-effector constraint from an INLINE GLOBAL pose.
+
+        Uses the same representation as _build_seam_constraint — global joint
+        positions (`posed_joints` [F, J, 3]) and global rotations
+        (`global_quats_xyzw` [F, J, 4]) fed straight into the constraint
+        constructor. This BYPASSES the local-rotation → FK path of
+        `from_dict`/`load_constraints_lst`, which only reproduces a pose if the
+        caller's local rotations share kimodo's exact rest-pose/joint basis
+        (externally-authored axis-angle generally does NOT, so those pins are
+        silently ignored). Pass poses you captured from this model's own
+        `posed_joints`/`global_quats_xyzw` output and the pin actually takes.
+
+        Dict fields: type, frame_indices, posed_joints, optional
+        global_quats_xyzw (required for end-effector types, which constrain
+        joint rotations; ignored by fullbody), optional reroot_xz (default
+        True — drop pelvis XZ so the pin sits at the origin), optional
+        joint_names (only for the base "end-effector" type).
+        """
+        typ = d["type"]
+        cls = TYPE_TO_CLASS[typ]
+        fi = torch.tensor(d["frame_indices"], device=device, dtype=torch.long)
+        joints = torch.tensor(np.asarray(d["posed_joints"], np.float32), device=device)  # [F, J, 3]
+        if joints.ndim != 3:
+            raise HTTPException(400, "posed_joints must be [F, J, 3]")
+        if len(fi) != len(joints):
+            raise HTTPException(400, "frame_indices and posed_joints length mismatch")
+        if d.get("reroot_xz", True):
+            ri = skeleton.root_idx
+            joints = joints.clone()
+            joints[..., 0] -= joints[:, ri, 0].unsqueeze(-1)
+            joints[..., 2] -= joints[:, ri, 2].unsqueeze(-1)
+
+        quats = d.get("global_quats_xyzw")
+        if quats is not None:
+            q = np.asarray(quats, np.float32)  # [F, J, 4]
+            rots = torch.tensor(tf.SO3.from_quaternion_xyzw(q).as_matrix(), device=device, dtype=torch.float32)
+        else:
+            # fullbody ignores global rots (update_constraints: "global rotations
+            # are not used here"); end-effector types DO constrain them, so demand them.
+            if cls is not FullBodyConstraintSet:
+                raise HTTPException(400, f"constraint '{typ}' requires global_quats_xyzw")
+            F, J = joints.shape[0], joints.shape[1]
+            rots = torch.eye(3, device=device, dtype=torch.float32).reshape(1, 1, 3, 3).expand(F, J, 3, 3).contiguous()
+
+        kwargs = {}
+        if cls is EndEffectorConstraintSet:  # base type carries explicit joint names
+            kwargs["joint_names"] = d["joint_names"]
+        return cls(
+            skeleton=skeleton,
+            frame_indices=fi,
+            global_joints_positions=joints,
+            global_joints_rots=rots,
+            **kwargs,
+        )
+
+    def _build_constraints(constraints: list):
+        """Turn the request's constraint dicts into constraint sets. A dict
+        carrying `posed_joints` is built from inline GLOBAL pose data
+        (_constraint_from_global); anything else (e.g. root2d, or local-rotation
+        fullbody) goes through the standard load_constraints_lst path."""
+        out = []
+        for d in constraints:
+            if isinstance(d, dict) and "posed_joints" in d and d.get("type") != "root2d":
+                out.append(_constraint_from_global(d))
+            else:
+                out.extend(load_constraints_lst([d], skeleton, device=device))
+        return out
+
     def _arrays_from_output(out) -> dict:
         """Model output dict -> the four per-frame arrays the store record holds."""
         local_rot_mats = out["local_rot_mats"][0].detach().cpu().numpy()  # [T, J, 3, 3]
@@ -450,9 +525,11 @@ def build_app() -> FastAPI:
 
         constraint_lst = None
         if req.constraints:
-            # Arbitrary constraints (fullbody/EE/root2d/mixed) from the request,
-            # in the constraints.json format. One per-sample list (we gen one sample).
-            constraint_lst = [load_constraints_lst(req.constraints, skeleton, device=device)]
+            # Arbitrary constraints (fullbody/EE/root2d/mixed) from the request.
+            # Dicts with `posed_joints` are built from inline global pose data;
+            # the rest go through the standard constraints.json loader. One
+            # per-sample list (we generate one sample).
+            constraint_lst = [_build_constraints(req.constraints)]
         elif req.seam_pose is not None:
             # Per-sample list of constraint sets; we only generate one sample.
             constraint_lst = [[_build_seam_constraint(req.seam_pose, num_frames, seconds)]]
