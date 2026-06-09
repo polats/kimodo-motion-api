@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from kimodo.constraints import FullBodyConstraintSet, compute_global_heading
+from kimodo.constraints import FullBodyConstraintSet, compute_global_heading, load_constraints_lst
 from kimodo.motion_rep.feature_utils import compute_heading_angle
 from kimodo.model.load_model import load_model
 from kimodo.scripts.animation_store import make_store
@@ -63,6 +63,13 @@ class GenerateRequest(BaseModel):
     # "kick" = frame the foot is highest, "punch" = frame the arm is most extended.
     end_on_peak: str | None = None
     num_steps: int | None = None  # override diffusion steps (default = NUM_DENOISING_STEPS)
+    # Raw constraints.json list (fullbody / left-hand|right-hand|left-foot|right-foot /
+    # root2d, mixed). Takes precedence over seam_pose. Frame indices are 0-based into
+    # the generated clip (length = seconds * fps). See kimodo.constraints.load_constraints_lst.
+    constraints: list | None = None
+    # Override post-processing (foot-lock IK + exact constraint snapping; needs the
+    # motion_correction package). Default: on iff any constraint is present.
+    post_processing: bool | None = None
 
 
 class GenerateSequenceRequest(BaseModel):
@@ -442,10 +449,15 @@ def build_app() -> FastAPI:
         num_frames = int(round(seconds * fps))
 
         constraint_lst = None
-        if req.seam_pose is not None:
+        if req.constraints:
+            # Arbitrary constraints (fullbody/EE/root2d/mixed) from the request,
+            # in the constraints.json format. One per-sample list (we gen one sample).
+            constraint_lst = [load_constraints_lst(req.constraints, skeleton, device=device)]
+        elif req.seam_pose is not None:
             # Per-sample list of constraint sets; we only generate one sample.
             constraint_lst = [[_build_seam_constraint(req.seam_pose, num_frames, seconds)]]
 
+        post_proc = req.post_processing if req.post_processing is not None else (constraint_lst is not None)
         with gen_lock:
             with torch.no_grad():
                 out = model(
@@ -453,12 +465,9 @@ def build_app() -> FastAPI:
                     num_frames,
                     int(req.num_steps) if req.num_steps else NUM_DENOISING_STEPS,
                     constraint_lst=constraint_lst,
-                    # Enable post-processing only for constrained runs:
-                    # foot-skate cleanup + constraint enforcement tightens the
-                    # seam pose match (frame 0 / frame N-1) so the loop wrap
-                    # doesn't visibly pop. Unconstrained runs keep the prior
-                    # behavior to avoid changing existing clips' character.
-                    post_processing=constraint_lst is not None,
+                    # Post-processing (foot-skate cleanup + exact constraint snapping)
+                    # defaults on for any constrained run; override via post_processing.
+                    post_processing=post_proc,
                     progress_bar=_passthrough,
                 )
         arr = _arrays_from_output(out)
