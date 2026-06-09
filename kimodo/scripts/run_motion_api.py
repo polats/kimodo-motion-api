@@ -76,6 +76,12 @@ class GenerateRequest(BaseModel):
     # Override post-processing (foot-lock IK + exact constraint snapping; needs the
     # motion_correction package). Default: on iff any constraint is present.
     post_processing: bool | None = None
+    # Classifier-free guidance weights used WHEN constraints are present. Pose
+    # constraints (fullbody/EE global positions) only enter via the separated-CFG
+    # constraint branch, so they're ignored unless constraint_weight > 0. Mirrors
+    # the official demo's cfg {text_weight, constraint_weight} (both default 2.0).
+    text_weight: float = 2.0
+    constraint_weight: float = 2.0
 
 
 class GenerateSequenceRequest(BaseModel):
@@ -535,6 +541,16 @@ def build_app() -> FastAPI:
             constraint_lst = [[_build_seam_constraint(req.seam_pose, num_frames, seconds)]]
 
         post_proc = req.post_processing if req.post_processing is not None else (constraint_lst is not None)
+        # Pose constraints (fullbody/EE) are injected via the separated-CFG
+        # constraint branch (out_uncond + w_text*(out_text-out_uncond) +
+        # w_constraint*(out_constraint-out_uncond)); without it the model only
+        # hard-imputes raw rep dims (root2d) and silently ignores joint-position
+        # pins. So force separated CFG whenever constraints are present.
+        cfg_kwargs = (
+            {"cfg_type": "separated", "cfg_weight": [float(req.text_weight), float(req.constraint_weight)]}
+            if constraint_lst is not None
+            else {}
+        )
         with gen_lock:
             with torch.no_grad():
                 out = model(
@@ -546,6 +562,7 @@ def build_app() -> FastAPI:
                     # defaults on for any constrained run; override via post_processing.
                     post_processing=post_proc,
                     progress_bar=_passthrough,
+                    **cfg_kwargs,
                 )
         arr = _arrays_from_output(out)
         if req.end_on_peak:
