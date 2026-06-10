@@ -683,12 +683,17 @@ def build_app() -> FastAPI:
         parent = {"continues_from": {"source_id": req.source_id, "frame": f}}
 
         if not req.stitch:
-            return _save_arrays(req.prompt.strip(), float(cont["local_quats_wxyz"].shape[0]) / fps, cont, None, extra=parent)
-
-        # Combined whole-kata clip (opt-in, e.g. for baking one sequence).
-        arr = _stitch_arrays(src, cont, f)
-        label = f"{src.get('prompt', req.source_id)} → {req.prompt.strip()}"
-        return _save_arrays(label, float(arr["local_quats_wxyz"].shape[0]) / fps, arr, None, extra=parent)
+            meta = _save_arrays(req.prompt.strip(), float(cont["local_quats_wxyz"].shape[0]) / fps, cont, None, extra=parent)
+        else:
+            # Combined whole-kata clip (opt-in, e.g. for baking one sequence).
+            arr = _stitch_arrays(src, cont, f)
+            label = f"{src.get('prompt', req.source_id)} → {req.prompt.strip()}"
+            meta = _save_arrays(label, float(arr["local_quats_wxyz"].shape[0]) / fps, arr, None, extra=parent)
+        # Surface the conditioned heading: a liveness marker for the drift fix
+        # (absent => the server is running pre-fix code).
+        if isinstance(meta, dict):
+            meta["first_heading_angle"] = float(first_heading_angle)
+        return meta
 
     def _pose_heading(posed_frame) -> float:
         """Ground-plane heading (radians) from the hip vector — matches kimodo's
