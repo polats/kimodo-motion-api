@@ -132,6 +132,35 @@ class GenerateContinueRequest(BaseModel):
     heading_mode: str | float = "zero"
 
 
+class BetweenKeyframe(BaseModel):
+    # One pinned pose in a /generate_between move. posed_joints [22,3] (global
+    # positions, canonical: re-rooted to XZ origin, facing heading 0) +
+    # global_quats_xyzw [22,4]. frac in [0,1] is the position along the move
+    # (0=start, 1=end); turn_deg rotates the pose about Y; advance translates it
+    # forward (in the turned facing) — so the server does the placement the kata
+    # assembler does, and the caller just supplies canonical stance poses.
+    posed_joints: list           # [22,3]
+    global_quats_xyzw: list      # [22,4]
+    frac: float = 0.0
+    turn_deg: float = 0.0
+    advance: float = 0.0
+
+
+class GenerateBetweenRequest(BaseModel):
+    # Generate a move that goes BETWEEN poses: pin the keyframe poses (start +
+    # optional apex(es) + end) and let the prompt drive the transition. This is
+    # the kata-composer engine — 0-drift seams by construction (pinning both ends),
+    # unlike generate_continue (frame-0 only, which drifts). Each keyframe is a
+    # captured stance pose; the move is saved as its own clip (optionally chained
+    # via continues_from).
+    prompt: str
+    keyframes: list[BetweenKeyframe]    # >= 2 (start + end); middle ones are apexes
+    seconds: float = DEFAULT_SECONDS
+    num_steps: int | None = None
+    post_processing: bool = True
+    continues_from_id: str | None = None   # chain this move onto a previous one (tree edge)
+
+
 class StitchPathRequest(BaseModel):
     # Concatenate a PATH of existing clips (e.g. a root→leaf kata path) into one
     # continuous motion, carrying world position AND heading forward across joins
@@ -712,6 +741,61 @@ def build_app() -> FastAPI:
             meta["first_heading_angle"] = None if first_heading_angle is None else float(first_heading_angle)
             meta["source_heading"] = float(source_heading)
         return meta
+
+    def _place_pose(posed, quats_xyzw, turn_deg, advance):
+        """Rotate a canonical pose about Y by turn_deg + translate forward by
+        `advance` (in the turned facing). Mirrors the kata assembler's place()."""
+        th = math.radians(float(turn_deg))
+        c, s = math.cos(th), math.sin(th)
+        Ry = np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], dtype=np.float32)
+        P = (np.asarray(posed, np.float32) @ Ry.T)
+        P[:, 0] += math.sin(th) * float(advance)   # forward = (sinθ, cosθ) in (x,z)
+        P[:, 2] += math.cos(th) * float(advance)
+        # rotate the global quats by Ry (pre-multiply the world rotation), via matrices
+        Q = np.asarray(quats_xyzw, np.float32)                              # [J,4] xyzw
+        Rq = tf.SO3.from_quaternion_xyzw(Q).as_matrix()                     # [J,3,3]
+        Rnew = Ry[None] @ Rq                                                # [J,3,3]
+        Qout = np.asarray(tf.SO3.from_matrix(Rnew).wxyz)[..., [1, 2, 3, 0]] # [J,4] xyzw
+        return P.tolist(), Qout.astype(np.float32).tolist()
+
+    @app.post("/generate_between")
+    def generate_between(req: GenerateBetweenRequest) -> dict:
+        """Generate a move pinned to >=2 keyframe poses (start + optional apex(es) +
+        end), letting the prompt drive the transition. 0-drift seams (both ends
+        pinned). The kata-composer engine."""
+        if not req.prompt or not req.prompt.strip():
+            raise HTTPException(400, "prompt is empty")
+        if not req.keyframes or len(req.keyframes) < 2:
+            raise HTTPException(400, "need at least 2 keyframes (start + end)")
+        ensure_model()
+        seconds = max(0.5, min(MAX_SECONDS, float(req.seconds)))
+        num_frames = int(round(seconds * fps))
+        last = num_frames - 1
+
+        frame_indices, posed_list, quat_list = [], [], []
+        for kf in req.keyframes:
+            P, Q = _place_pose(kf.posed_joints, kf.global_quats_xyzw, kf.turn_deg, kf.advance)
+            fi = int(round(max(0.0, min(1.0, float(kf.frac))) * last))
+            frame_indices.append(fi); posed_list.append(P); quat_list.append(Q)
+        constraint = _constraint_from_global({
+            "type": "fullbody", "frame_indices": frame_indices,
+            "posed_joints": posed_list, "global_quats_xyzw": quat_list, "reroot_xz": False,
+        })
+
+        with gen_lock:
+            with torch.no_grad():
+                out = model(
+                    [req.prompt.strip()], num_frames,
+                    int(req.num_steps) if req.num_steps else NUM_DENOISING_STEPS,
+                    constraint_lst=[[constraint]],
+                    post_processing=req.post_processing,
+                    progress_bar=_passthrough,
+                )
+        arr = _arrays_from_output(out)
+        extra = None
+        if req.continues_from_id:
+            extra = {"continues_from": {"source_id": req.continues_from_id, "frame": -1}}
+        return _save_arrays(req.prompt.strip(), seconds, arr, None, extra=extra)
 
     def _pose_heading(posed_frame) -> float:
         """Ground-plane heading (radians) from the hip vector — matches kimodo's
