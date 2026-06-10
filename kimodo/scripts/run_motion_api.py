@@ -123,11 +123,13 @@ class GenerateContinueRequest(BaseModel):
     post_processing: bool = True
     num_steps: int | None = None  # override diffusion steps (default = NUM_DENOISING_STEPS)
     # Heading conditioning control (for diagnosing/fixing root drift):
-    #   "source" (default) = condition on the pinned pose's heading (matches the
-    #     imputed constraint, like the multi_prompt transition path),
-    #   "zero" = force first_heading_angle=0 (the original pre-fix behavior),
+    #   "zero" (DEFAULT) = force first_heading_angle=0 = the ORIGINAL pre-fix
+    #     behavior, so existing callers (kata builder, web, Space) are unchanged
+    #     until the fix is proven,
+    #   "source" = condition on the pinned pose's heading (the candidate fix,
+    #     matching the imputed constraint like the multi_prompt transition path),
     #   a float = use that explicit angle in radians.
-    heading_mode: str | float = "source"
+    heading_mode: str | float = "zero"
 
 
 class StitchPathRequest(BaseModel):
