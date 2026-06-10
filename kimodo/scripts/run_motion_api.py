@@ -122,6 +122,12 @@ class GenerateContinueRequest(BaseModel):
     # constraint still guides frame 0 and the path stitch realigns the join.
     post_processing: bool = True
     num_steps: int | None = None  # override diffusion steps (default = NUM_DENOISING_STEPS)
+    # Heading conditioning control (for diagnosing/fixing root drift):
+    #   "source" (default) = condition on the pinned pose's heading (matches the
+    #     imputed constraint, like the multi_prompt transition path),
+    #   "zero" = force first_heading_angle=0 (the original pre-fix behavior),
+    #   a float = use that explicit angle in radians.
+    heading_mode: str | float = "source"
 
 
 class StitchPathRequest(BaseModel):
@@ -660,7 +666,16 @@ def build_app() -> FastAPI:
 
         seconds = max(0.5, min(MAX_SECONDS, float(req.seconds)))
         num_frames = int(round(seconds * fps))
-        constraint, first_heading_angle = _build_start_constraint(req.source_id, f)
+        constraint, source_heading = _build_start_constraint(req.source_id, f)
+
+        # Resolve the heading conditioning per heading_mode (see request field).
+        hm = req.heading_mode
+        if hm == "zero":
+            first_heading_angle = None
+        elif isinstance(hm, (int, float)):
+            first_heading_angle = torch.tensor([float(hm)], device=device)
+        else:  # "source"
+            first_heading_angle = source_heading.reshape(1)
 
         with gen_lock:
             with torch.no_grad():
@@ -671,7 +686,7 @@ def build_app() -> FastAPI:
                     constraint_lst=[[constraint]],
                     # Match the conditioning heading to the pinned pose's heading so
                     # the free root doesn't drift to reconcile a 0-vs-θ conflict.
-                    first_heading_angle=first_heading_angle.reshape(1),
+                    first_heading_angle=first_heading_angle,
                     post_processing=req.post_processing,   # enforce the frame-0 seam so the join doesn't pop
                     progress_bar=_passthrough,
                 )
@@ -692,7 +707,8 @@ def build_app() -> FastAPI:
         # Surface the conditioned heading: a liveness marker for the drift fix
         # (absent => the server is running pre-fix code).
         if isinstance(meta, dict):
-            meta["first_heading_angle"] = float(first_heading_angle)
+            meta["first_heading_angle"] = None if first_heading_angle is None else float(first_heading_angle)
+            meta["source_heading"] = float(source_heading)
         return meta
 
     def _pose_heading(posed_frame) -> float:
