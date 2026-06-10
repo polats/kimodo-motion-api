@@ -472,15 +472,19 @@ def build_app() -> FastAPI:
         pj = arr["posed_joints"].copy(); pj[..., 0] -= off[0]; pj[..., 2] -= off[2]
         return {**arr, "root_positions": rp, "posed_joints": pj}
 
-    def _build_start_constraint(source_id: str, frame_idx: int) -> FullBodyConstraintSet:
+    def _build_start_constraint(source_id: str, frame_idx: int) -> tuple[FullBodyConstraintSet, torch.Tensor]:
         """Pin ONLY frame 0 of the new motion to a source clip's frame pose
         (re-rooted to XZ origin), leaving the rest free → a continuation. This is
         the ORIGINAL implementation that built the kata library.
 
-        Deliberately NO first_heading_angle: the full-body frame-0 pin already sets
-        the start orientation, and seeding a heading injects a large backward root
-        drift on non-locomotion moves (measured: 2.4m back with heading vs 0.6m
-        without, on the same kick→punch). Don't re-add it."""
+        Returns (constraint, first_heading_angle). The fullbody pin imputes the
+        source pose's global_root_heading at frame 0; the model ALSO takes a
+        separate `first_heading_angle` conditioning token which defaults to 0
+        (facing +Z). If those disagree (the pinned pose faces some θ≠0), the model
+        reconciles the conflict by drifting the free root backward (measured ~3.5m).
+        So we compute the SOURCE pose's heading here and return it, to be passed as
+        first_heading_angle — mirroring what the multi_prompt transition path does
+        (kimodo_model.py: first_heading_angle = compute_heading_angle(prev pose))."""
         rec = store.get(source_id)
         if rec is None:
             raise HTTPException(404, f"source_id '{source_id}' not found")
@@ -496,12 +500,19 @@ def build_app() -> FastAPI:
         joints_at_origin[:, 0] -= joints[root_idx, 0]
         joints_at_origin[:, 2] -= joints[root_idx, 2]
 
-        return FullBodyConstraintSet(
+        # Heading (radians) of the pinned source pose, computed the same way the
+        # FullBodyConstraintSet imputes global_root_heading. Shape [B, T] -> scalar.
+        first_heading_angle = compute_heading_angle(
+            joints_at_origin[None, None], skeleton
+        )[0, 0]
+
+        constraint = FullBodyConstraintSet(
             skeleton=skeleton,
             frame_indices=torch.tensor([0], device=device, dtype=torch.long),
             global_joints_positions=joints_at_origin.unsqueeze(0),  # [1, J, 3]
             global_joints_rots=rots.unsqueeze(0),                   # [1, J, 3, 3]
         )
+        return constraint, first_heading_angle
 
     def _stitch_arrays(src_rec: dict, cont: dict, upto_frame: int) -> dict:
         """Prepend source[:upto_frame+1] to the continuation. The continuation was
@@ -649,7 +660,7 @@ def build_app() -> FastAPI:
 
         seconds = max(0.5, min(MAX_SECONDS, float(req.seconds)))
         num_frames = int(round(seconds * fps))
-        constraint = _build_start_constraint(req.source_id, f)
+        constraint, first_heading_angle = _build_start_constraint(req.source_id, f)
 
         with gen_lock:
             with torch.no_grad():
@@ -658,6 +669,9 @@ def build_app() -> FastAPI:
                     num_frames,
                     int(req.num_steps) if req.num_steps else NUM_DENOISING_STEPS,
                     constraint_lst=[[constraint]],
+                    # Match the conditioning heading to the pinned pose's heading so
+                    # the free root doesn't drift to reconcile a 0-vs-θ conflict.
+                    first_heading_angle=first_heading_angle.reshape(1),
                     post_processing=req.post_processing,   # enforce the frame-0 seam so the join doesn't pop
                     progress_bar=_passthrough,
                 )
