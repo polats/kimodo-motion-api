@@ -94,6 +94,23 @@
             <option value="none">none</option>
           </select>
         </div>
+        <div id="row-skin" style="display: flex; gap: 8px; align-items: center; font-size: 13px; color: #bbb;">
+          <label for="skin-url">Skin texture:</label>
+          <input id="skin-url" type="text" placeholder="/textures/citizen_skin_color.png or a generated URL"
+                 value="/textures/citizen_skin_color.png"
+                 style="flex: 1; padding: 6px 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; font-size: 12px;" />
+          <button id="skin-apply" style="padding: 6px 10px;">Apply</button>
+          <label title="Flip texture vertically (FBX UV vs atlas origin)"><input type="checkbox" id="skin-flipy" /> flipY</label>
+          <input id="skin-file" type="file" accept="image/*" style="display: none;" />
+          <button id="skin-file-btn" title="Load a texture file from disk" style="padding: 6px 10px; background: #3a4a5a;">File…</button>
+        </div>
+        <div id="row-texgen" style="display: flex; gap: 8px; align-items: center; font-size: 13px; color: #bbb;">
+          <label for="texgen-prompt">Generate skin:</label>
+          <input id="texgen-prompt" type="text" placeholder="e.g. worn leather armor, weathered bronze, tribal tattoos"
+                 value="cracked volcanic rock skin with glowing orange lava veins"
+                 style="flex: 1; padding: 6px 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; font-size: 12px;" />
+          <button id="texgen-go" title="Generate a texture via the FLUX.2-klein ZeroGPU space and apply it">Generate</button>
+        </div>
         <div id="mixamo-panel">
           <input id="mixamo-search" type="text" placeholder="Search Mixamo characters (e.g. 'robot', 'zombie', 'knight')…" />
           <div id="mixamo-status"></div>

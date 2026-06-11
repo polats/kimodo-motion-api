@@ -5,6 +5,7 @@ import { FBXLoader } from 'three/addons/loaders/FBXLoader.js'
 import { Animator } from './animator.js'
 import { CHARACTERS, getCharacter, mixamoMapping } from './rigs.js'
 import { initPhysics, spawnTestCapsule, stepPhysics, isReady as physicsReady, Ragdoll, BlockRagdoll } from './ragdoll.js'
+import { generateSkinTexture } from './texgen.js'
 
 // Mapping kinds the backend may return when importing a remote character.
 // Keep in sync with kimodo/scripts/mixamo.py.
@@ -143,25 +144,190 @@ function stopMixamoMixer() {
   }
 }
 
-// FBXLoader produces one Skeleton per SkinnedMesh — citizen FBX has 8 meshes
-// (feet, legs, hands, chest, underwear, eyes, mouth, head), each with its own
-// 84-bone Skeleton instance. Verified empirically that all 8 skeletons share
-// identical inverseBindMatrices and same bone order. So we can make every
-// mesh point at the FIRST skeleton; updates to its bones then drive all
-// meshes' deformation through a single shared rig.
+// FBXLoader produces one Skeleton per SkinnedMesh — the citizen FBX splits the
+// body into several meshes (feet, legs, hands, torso, head, …), each carrying
+// ONLY the bones that influence it, in its own order. The abstract LOD2 sausage
+// has 5 meshes each with a 16-bone skeleton, but they're DIFFERENT 16 bones
+// (Torso's skinIndex reaches 20, Hands' reaches 35), so naively rebinding every
+// mesh to the first mesh's skeleton leaves their skinIndex values pointing at
+// out-of-range / wrong bones — the mesh collapses to the origin and three's
+// exact skinned-bounds even throws on the dangling bone.
+//
+// Build a master skeleton from the UNION of all meshes' bones (keyed by name),
+// then remap each mesh's skinIndex buffer into that shared order before binding.
+// One skeleton then correctly drives every mesh. (For rigs that already share
+// one bone table, the union is identical and the remap is the identity.)
 function unifySkeletons( root ) {
   if ( !root ) return false
   const meshes = []
   root.traverse( o => { if ( o.isSkinnedMesh ) meshes.push( o ) } )
   if ( meshes.length < 2 ) return false
-  const master = meshes[ 0 ].skeleton
-  for ( let i = 1; i < meshes.length; i++ ) {
-    // Rebind without resetting bind matrix — keeps each mesh's own bind
-    // transform but switches the skeleton (bones + inverseBindMatrices).
-    meshes[ i ].bind( master, meshes[ i ].bindMatrix )
+
+  const masterBones = []
+  const masterInverses = []
+  const indexByName = new Map()
+  for ( const m of meshes ) {
+    const sk = m.skeleton
+    sk.bones.forEach( ( bone, i ) => {
+      if ( indexByName.has( bone.name ) ) return
+      indexByName.set( bone.name, masterBones.length )
+      masterBones.push( bone )
+      masterInverses.push( sk.boneInverses[ i ].clone() )
+    } )
   }
-  console.log( `[unifySkeletons] reassigned ${meshes.length - 1} meshes to mesh-0 skeleton (${master.bones.length} bones)` )
+  const master = new THREE.Skeleton( masterBones, masterInverses )
+
+  for ( const m of meshes ) {
+    const remap = m.skeleton.bones.map( b => indexByName.get( b.name ) )
+    const si = m.geometry.getAttribute( 'skinIndex' )
+    for ( let i = 0; i < si.count; i++ ) {
+      for ( let k = 0; k < si.itemSize; k++ ) {
+        const mapped = remap[ si.getComponent( i, k ) ]
+        if ( mapped !== undefined ) si.setComponent( i, k, mapped )
+      }
+    }
+    si.needsUpdate = true
+    m.bind( master, m.bindMatrix )
+  }
+  console.log( `[unifySkeletons] unified ${meshes.length} meshes onto ${masterBones.length}-bone master skeleton` )
   return true
+}
+
+// --- Skin texturing -------------------------------------------------------
+// The s&box citizen shares ONE UV atlas across all skin meshes (torso, legs,
+// hands, feet, head — material "citizen_skin"), so a single image textures the
+// whole body. This is the seam where a FLUX-generated atlas gets swapped in.
+// The LOD2 FBX bakes an unresolvable absolute Windows texture path, so the mesh
+// arrives untextured; we assign the map ourselves.
+const texLoader = new THREE.TextureLoader()
+let currentSkinTexture = null
+let lastTextureUrl = null
+
+function applySkinTexture( root, url, { flipY = false } = {} ) {
+  if ( !root || !url ) return 0
+  lastTextureUrl = url
+  const tex = texLoader.load( url, () => { /* loaded; render loop picks it up */ } )
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.flipY = flipY  // FBX UVs vs atlas origin — toggle in UI if it looks upside-down
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy()
+  tex.needsUpdate = true
+  if ( currentSkinTexture && currentSkinTexture !== tex ) currentSkinTexture.dispose()
+  currentSkinTexture = tex
+  let n = 0
+  root.traverse( o => {
+    if ( !o.isMesh && !o.isSkinnedMesh ) return
+    const mats = Array.isArray( o.material ) ? o.material : [ o.material ]
+    for ( const m of mats ) {
+      if ( !m ) continue
+      // Skip non-skin parts on the human variants (eyes/mouth have their own UVs).
+      const name = ( m.name || o.name || '' ).toLowerCase()
+      if ( /eye|mouth|teeth|tongue|brow|lash|cornea/.test( name ) ) continue
+      m.map = tex
+      if ( m.color ) m.color.setScalar( 1 )  // don't tint the atlas with a leftover material color
+      m.needsUpdate = true
+      n++
+    }
+  } )
+  console.log( `[applySkinTexture] ${url} (flipY=${flipY}) → ${n} material(s)` )
+  return n
+}
+
+// Console / UI hook: retexture the current character with an arbitrary URL
+// (e.g. a FLUX-generated atlas served from tiny-army or a data: URL).
+window.setSkinTexture = ( url, opts ) => applySkinTexture( currentRoot, url, opts )
+
+// --- Skin texture UI wiring ---
+let skinTexFlipY = false
+const skinUrlEl = document.getElementById( 'skin-url' )
+const skinApplyEl = document.getElementById( 'skin-apply' )
+const skinFlipYEl = document.getElementById( 'skin-flipy' )
+const skinFileEl = document.getElementById( 'skin-file' )
+const skinFileBtnEl = document.getElementById( 'skin-file-btn' )
+
+function applySkinFromUI() {
+  const url = skinUrlEl.value.trim()
+  if ( !url ) return
+  const n = applySkinTexture( currentRoot, url, { flipY: skinTexFlipY } )
+  setStatus( n ? `Applied skin texture to ${n} material(s).` : 'No skin meshes found to texture.' )
+}
+
+skinApplyEl?.addEventListener( 'click', applySkinFromUI )
+skinUrlEl?.addEventListener( 'keydown', e => { if ( e.key === 'Enter' ) applySkinFromUI() } )
+skinFlipYEl?.addEventListener( 'change', () => {
+  skinTexFlipY = skinFlipYEl.checked
+  // Re-apply the last texture so the flip takes effect immediately.
+  if ( lastTextureUrl ) applySkinTexture( currentRoot, lastTextureUrl, { flipY: skinTexFlipY } )
+} )
+skinFileBtnEl?.addEventListener( 'click', () => skinFileEl?.click() )
+skinFileEl?.addEventListener( 'change', () => {
+  const f = skinFileEl.files?.[ 0 ]
+  if ( !f ) return
+  const url = URL.createObjectURL( f )
+  skinUrlEl.value = f.name
+  applySkinTexture( currentRoot, url, { flipY: skinTexFlipY } )
+  setStatus( `Applied local texture: ${f.name}` )
+} )
+
+// Generate a skin texture via the deployed FLUX.2-klein ZeroGPU space (proxied
+// through vite at /hfspace) and apply it to the current character. This is the
+// end-to-end texture-replacement test: prompt → FLUX → atlas → mesh.
+const texgenPromptEl = document.getElementById( 'texgen-prompt' )
+const texgenGoEl = document.getElementById( 'texgen-go' )
+let texgenAbort = null
+
+async function generateAndApplySkin() {
+  const prompt = texgenPromptEl.value.trim()
+  if ( !prompt ) return
+  texgenGoEl.disabled = true
+  texgenGoEl.textContent = 'Generating…'
+  texgenAbort = new AbortController()
+  // ZeroGPU cold-start + queue can run long; cap it generously.
+  const timer = setTimeout( () => texgenAbort.abort(), 240_000 )
+  try {
+    setStatus( 'Generating skin via FLUX.2-klein (ZeroGPU)… this can take ~30–90s.' )
+    const url = await generateSkinTexture( prompt, { seed: 42, signal: texgenAbort.signal } )
+    skinUrlEl.value = url
+    const n = applySkinTexture( currentRoot, url, { flipY: skinTexFlipY } )
+    setStatus( n ? `Applied generated skin to ${n} material(s).` : 'Generated, but no skin meshes to texture.' )
+  } catch ( e ) {
+    console.error( '[texgen]', e )
+    setStatus( `Texture generation failed: ${e.message}` )
+  } finally {
+    clearTimeout( timer )
+    texgenAbort = null
+    texgenGoEl.disabled = false
+    texgenGoEl.textContent = 'Generate'
+  }
+}
+
+texgenGoEl?.addEventListener( 'click', generateAndApplySkin )
+texgenPromptEl?.addEventListener( 'keydown', e => { if ( e.key === 'Enter' ) generateAndApplySkin() } )
+
+// Rest-pose bounding box. three r171's Box3.setFromObject computes *exact*
+// skinned bounds by dereferencing skeleton.bones[skinIndex] per vertex — which
+// throws on the s&box citizen, whose unified skeleton doesn't contain every
+// bone index its meshes reference (the LOD2 sausage's 5 meshes don't share one
+// bone table). Try the precise path first (matches prior behavior for the GLB
+// rigs that work), and fall back to a skinning-free box built from each
+// geometry's rest-pose bounding box, which is what we actually want here.
+const _restBox = new THREE.Box3()
+const _geoBox = new THREE.Box3()
+function restBoundingBox(root) {
+  try {
+    return new THREE.Box3().setFromObject(root)
+  } catch (e) {
+    console.warn('[restBoundingBox] skinned setFromObject failed, using rest-pose geometry bounds:', e.message)
+    _restBox.makeEmpty()
+    root.updateMatrixWorld(true)
+    root.traverse(o => {
+      if (!o.geometry) return
+      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox()
+      if (!o.geometry.boundingBox) return
+      _geoBox.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld)
+      _restBox.union(_geoBox)
+    })
+    return _restBox.clone()
+  }
 }
 
 async function loadCharacter(charConfig) {
@@ -198,9 +364,15 @@ async function loadCharacter(charConfig) {
     if (o.isSkinnedMesh) o.frustumCulled = false  // skinning + culling = glitches
   })
 
+  // Apply the configured skin atlas (e.g. the s&box citizen texture, or a
+  // FLUX-generated replacement). No-op for characters without a `texture`.
+  if (charConfig.texture) {
+    applySkinTexture(root, charConfig.texture, { flipY: skinTexFlipY })
+  }
+
   // Anchor feet to Y=0 in scene, after scale + bones are realized.
   root.updateMatrixWorld(true)
-  const restBox = new THREE.Box3().setFromObject(root)
+  const restBox = restBoundingBox(root)
   const groundOffsetY = -restBox.min.y
   root.position.y += groundOffsetY
 

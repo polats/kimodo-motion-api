@@ -244,6 +244,12 @@ export const CHARACTERS = [
     skinned: true,
     mapping: citizenMapping(),
     scale: 0.01,  // sbox units are inches; kimodo data is meters → scale 1u→1cm
+    // s&box skin atlas (decompiled from citizen_skin_young_color.vtex_c, 2048²).
+    // The LOD2 FBX bakes an absolute Windows path for this texture, so it can't
+    // resolve in the browser and the mesh loads untextured — supply it here.
+    // Swap this URL (or use the "Skin texture" box in the UI) to drop in a
+    // FLUX-generated atlas. All citizen_skin meshes share this one UV layout.
+    texture: '/textures/citizen_skin_color.png',
   },
   {
     id: 'citizen_human_male',
